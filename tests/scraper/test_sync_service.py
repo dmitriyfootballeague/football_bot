@@ -1,0 +1,508 @@
+import asyncio
+from datetime import date, datetime, timezone
+
+from sqlalchemy.dialects import postgresql
+
+from football_bot.models import (
+    Club,
+    Player,
+    PlayerPosition,
+    PlayerRole,
+    RegistrationStatus,
+    Tournament,
+)
+from scraper.scraped_data import ScrapedPlayer, ScrapedTeam, ScrapedTournament
+from scraper.sync_service import SyncService, _compute_rankings, _compute_total_points
+
+
+def make_player(
+    *,
+    player_id: int,
+    telegram_id: int,
+    first_name: str,
+    last_name: str,
+    position=PlayerPosition.MIDFIELDER,
+    registration_status=RegistrationStatus.APPROVED,
+):
+    return Player(
+        id=player_id,
+        telegram_id=telegram_id,
+        first_name=first_name,
+        last_name=last_name,
+        position=position,
+        description=None,
+        birth_date=date(2000, 1, 1),
+        photo_file_id="photo",
+        role=PlayerRole.PLAYER,
+        registration_status=registration_status,
+    )
+
+
+class FakeScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._value
+
+
+class FakeSession:
+    def __init__(self, execute_results=None, events=None, name="session"):
+        self.execute_results = list(execute_results or [])
+        self.executed_statements = []
+        self.added = []
+        self.flush_calls = 0
+        self.events = events if events is not None else []
+        self.name = name
+
+    async def execute(self, _stmt):
+        self.executed_statements.append(_stmt)
+        if not self.execute_results:
+            return FakeScalarResult(None)
+        return FakeScalarResult(self.execute_results.pop(0))
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def flush(self):
+        self.flush_calls += 1
+        next_id = 100
+        for obj in self.added:
+            if getattr(obj, "id", None) is None:
+                obj.id = next_id
+                next_id += 1
+
+    async def commit(self):
+        self.events.append(f"{self.name}:commit")
+
+
+class FakeSessionContext:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakeSessionPool:
+    def __init__(self, sessions):
+        self.sessions = list(sessions)
+
+    def __call__(self):
+        if not self.sessions:
+            raise AssertionError("No more fake sessions available")
+        return FakeSessionContext(self.sessions.pop(0))
+
+
+class FakeScraper:
+    def __init__(self, events):
+        self.events = events
+
+    async def scrape_tournaments(self):
+        self.events.append("scrape_tournaments")
+        return [
+            ScrapedTournament(name="League", external_id="t1", url="u1"),
+        ]
+
+    async def scrape_teams(self, tournaments):
+        self.events.append(("scrape_teams", [t.name for t in tournaments]))
+        return [
+            ScrapedTeam(name="Club A", tournament="League", external_id="c1", club_url="uA"),
+            ScrapedTeam(name="Club B", tournament="League", external_id="c2", club_url="uB"),
+        ]
+
+    async def scrape_players_for_team(self, team):
+        self.events.append(("scrape_players_for_team", team.name))
+        current = [
+            ScrapedPlayer(
+                first_name=team.name,
+                last_name="Cur",
+                external_id=f"{team.external_id}-cur",
+                team=team.name,
+                tournament=team.tournament,
+                games_played=1,
+                goals=1,
+            )
+        ]
+        previous = [
+            ScrapedPlayer(
+                first_name=team.name,
+                last_name="Prev",
+                external_id=f"{team.external_id}-prev",
+                team=team.name,
+                tournament=team.tournament,
+                games_played=1,
+                goals=1,
+            )
+        ]
+        return current, previous
+
+
+def test_compute_total_points_prefers_scraped_rating():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=10,
+        mvp_count=1,
+        goals=2,
+        assists=3,
+        rating=91.5,
+    )
+
+    assert _compute_total_points(player) == 91.5
+
+
+def test_compute_total_points_falls_back_to_formula():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=10,
+        mvp_count=2,
+        goals=3,
+        assists=4,
+    )
+
+    assert _compute_total_points(player) == 17
+
+
+def test_compute_rankings_groups_by_tournament_and_computes_ranks():
+    players = [
+        ScrapedPlayer(
+            first_name="Ivan",
+            last_name="Petrov",
+            external_id="p1",
+            team="FC Test",
+            tournament="Optic",
+            games_played=2,
+            goals=2,
+            assists=1,
+            mvp_count=1,
+        ),
+        ScrapedPlayer(
+            first_name="Petr",
+            last_name="Ivanov",
+            external_id="p2",
+            team="FC Test",
+            tournament="Optic",
+            games_played=4,
+            goals=1,
+            assists=0,
+            mvp_count=0,
+        ),
+        ScrapedPlayer(
+            first_name="Sergey",
+            last_name="Sidorov",
+            external_id="p3",
+            team="FC Other",
+            tournament="Cup",
+            games_played=1,
+            rating=50,
+        ),
+    ]
+
+    rankings = _compute_rankings(players)
+
+    assert rankings["p1"] == {
+        "current_rating": 9,
+        "division_rank": 1,
+        "division_total": 2,
+        "avg_points_per_game": 4.5,
+    }
+    assert rankings["p2"] == {
+        "current_rating": 3,
+        "division_rank": 2,
+        "division_total": 2,
+        "avg_points_per_game": 0.75,
+    }
+    assert rankings["p3"] == {
+        "current_rating": 50,
+        "division_rank": 1,
+        "division_total": 1,
+        "avg_points_per_game": 50.0,
+    }
+
+
+def test_compute_rankings_uses_minimum_one_game_for_average():
+    players = [
+        ScrapedPlayer(
+            first_name="Ivan",
+            last_name="Petrov",
+            external_id="p1",
+            team="FC Test",
+            tournament="Optic",
+            games_played=0,
+            goals=1,
+            assists=0,
+            mvp_count=0,
+        ),
+    ]
+
+    rankings = _compute_rankings(players)
+
+    assert rankings["p1"]["avg_points_per_game"] == 3.0
+
+
+def test_upsert_tournaments_batch_creates_new_and_updates_missing_external_id():
+    existing = Tournament(id=7, name="Cup", external_id=None)
+    session = FakeSession(execute_results=[[existing]])
+    tournaments = [
+        ScrapedTournament(name="League", external_id="t1", url="u1"),
+        ScrapedTournament(name="Cup", external_id="t2", url="u2"),
+    ]
+
+    tournament_map = asyncio.run(SyncService._upsert_tournaments_batch(session, tournaments))
+
+    assert existing.external_id == "t2"
+    assert len(session.added) == 1
+    assert session.added[0].name == "League"
+    assert tournament_map["Cup"] == 7
+    assert "League" in tournament_map
+
+
+def test_upsert_clubs_batch_scopes_same_club_name_by_tournament():
+    existing = Club(id=10, name="Spartak", tournament_id=1, external_id=None)
+    session = FakeSession(execute_results=[[existing]])
+    teams = [
+        ScrapedTeam(name="Spartak", tournament="League A", external_id="c1", club_url="u1"),
+        ScrapedTeam(name="Spartak", tournament="League B", external_id="c2", club_url="u2"),
+    ]
+    tournament_map = {"League A": 1, "League B": 2}
+
+    club_map = asyncio.run(SyncService._upsert_clubs_batch(session, teams, tournament_map))
+
+    assert existing.external_id == "c1"
+    assert len(session.added) == 1
+    assert session.added[0].tournament_id == 2
+    assert club_map[("League A", "Spartak")] == 10
+    assert ("League B", "Spartak") in club_map
+
+
+def test_save_scraped_players_batch_uses_tournament_and_club_map(monkeypatch):
+    calls = []
+    session = FakeSession()
+    players = [
+        ScrapedPlayer(
+            first_name="Ivan",
+            last_name="Petrov",
+            external_id="p1",
+            team="Club A",
+            tournament="League",
+        ),
+        ScrapedPlayer(
+            first_name="Petr",
+            last_name="Ivanov",
+            external_id="p2",
+            team="Club B",
+            tournament="League",
+        ),
+    ]
+
+    async def fake_upsert_scraped_player(_session, player, club_id):
+        calls.append((player.external_id, club_id))
+
+    monkeypatch.setattr(SyncService, "_upsert_scraped_player", staticmethod(fake_upsert_scraped_player))
+
+    saved = asyncio.run(
+        SyncService._save_scraped_players_batch(
+            session,
+            players,
+            {("League", "Club A"): 1, ("League", "Club B"): 2},
+        )
+    )
+
+    assert saved == 2
+    assert calls == [("p1", 1), ("p2", 2)]
+    assert session.flush_calls == 1
+
+
+def test_upsert_scraped_player_uses_postgres_on_conflict_update():
+    session = FakeSession()
+    scraped_player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="player-1",
+        team="Club A",
+        tournament="League",
+        games_played=5,
+        mvp_count=1,
+        goals=2,
+        assists=3,
+        yellow_cards=1,
+        red_cards=0,
+    )
+
+    asyncio.run(SyncService._upsert_scraped_player(session, scraped_player, club_id=10))
+
+    assert session.added == []
+    assert len(session.executed_statements) == 1
+    sql = str(
+        session.executed_statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "ON CONFLICT" in sql
+    assert "DO UPDATE" in sql
+    assert "scraped_player_stats" in sql
+
+
+def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeypatch):
+    now = datetime.now(timezone.utc)
+    player_a = make_player(player_id=1, telegram_id=101, first_name="Ivan", last_name="Petrov")
+    player_b = make_player(player_id=2, telegram_id=102, first_name="Petr", last_name="Ivanov")
+    players_by_external_id = {
+        "cur-a": player_a,
+        "cur-b": player_b,
+        "prev-a": player_a,
+        "prev-b": player_b,
+    }
+
+    async def fake_find_registered_player(_session, scraped_player):
+        return players_by_external_id.get(scraped_player.external_id)
+
+    monkeypatch.setattr(SyncService, "_find_registered_player", staticmethod(fake_find_registered_player))
+
+    current_players = [
+        ScrapedPlayer(
+            first_name="Ivan",
+            last_name="Petrov",
+            external_id="cur-a",
+            team="Club A",
+            tournament="League",
+            games_played=2,
+            goals=2,
+            assists=1,
+            mvp_count=1,
+        ),
+        ScrapedPlayer(
+            first_name="Petr",
+            last_name="Ivanov",
+            external_id="cur-b",
+            team="Club B",
+            tournament="League",
+            games_played=3,
+            goals=1,
+            assists=0,
+            mvp_count=0,
+        ),
+    ]
+    prev_players = [
+        ScrapedPlayer(
+            first_name="Ivan",
+            last_name="Petrov",
+            external_id="prev-a",
+            team="Club A",
+            tournament="League",
+        ),
+        ScrapedPlayer(
+            first_name="Petr",
+            last_name="Ivanov",
+            external_id="prev-b",
+            team="Club B",
+            tournament="League",
+        ),
+    ]
+    ranking_map = {
+        "cur-a": {"current_rating": 9, "division_rank": 1, "division_total": 2, "avg_points_per_game": 4.5},
+        "cur-b": {"current_rating": 3, "division_rank": 2, "division_total": 2, "avg_points_per_game": 1.0},
+    }
+    prev_ranking_map = {
+        "prev-a": {"current_rating": 11, "division_rank": 1, "division_total": 2, "avg_points_per_game": 5.5},
+        "prev-b": {"current_rating": 4, "division_rank": 2, "division_total": 2, "avg_points_per_game": 2.0},
+    }
+    session = FakeSession()
+
+    matched, prev_matched = asyncio.run(
+        SyncService._sync_registered_players_batch(
+            session=session,
+            current_players=current_players,
+            prev_players=prev_players,
+            ranking_map=ranking_map,
+            prev_ranking_map=prev_ranking_map,
+            now=now,
+        )
+    )
+
+    assert matched == 2
+    assert prev_matched == 2
+    assert player_a.external_id == "cur-a"
+    assert player_a.current_rating == 9
+    assert player_b.current_rating == 3
+    assert player_a.position_rank == 1
+    assert player_b.position_rank == 2
+    assert player_a.prev_season_rating == 11
+    assert player_b.prev_season_rating == 4
+    assert player_a.prev_position_rank == 1
+    assert player_b.prev_position_rank == 2
+    assert session.flush_calls == 1
+
+
+def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
+    events = []
+    first_session = FakeSession(events=events, name="session1")
+    second_session = FakeSession(events=events, name="session2")
+    pool = FakeSessionPool([first_session, second_session])
+
+    async def fake_upsert_tournaments_batch(_session, tournaments):
+        events.append(("upsert_tournaments_batch", [t.name for t in tournaments]))
+        return {"League": 1}
+
+    async def fake_upsert_clubs_batch(_session, teams, tournament_map):
+        events.append(("upsert_clubs_batch", [team.name for team in teams], tournament_map))
+        return {("League", "Club A"): 10, ("League", "Club B"): 20}
+
+    async def fake_save_scraped_players_batch(session, players, club_map):
+        events.append(("save_scraped_players_batch", [player.team for player in players], club_map))
+        return len(players)
+
+    async def fake_sync_registered_players_batch(
+        session, current_players, prev_players, ranking_map, prev_ranking_map, now
+    ):
+        events.append((
+            "sync_registered_players_batch",
+            [player.team for player in current_players],
+            [player.team for player in prev_players],
+        ))
+        return len(current_players), len(prev_players)
+
+    monkeypatch.setattr(SyncService, "_upsert_tournaments_batch", staticmethod(fake_upsert_tournaments_batch))
+    monkeypatch.setattr(SyncService, "_upsert_clubs_batch", staticmethod(fake_upsert_clubs_batch))
+    monkeypatch.setattr(SyncService, "_save_scraped_players_batch", classmethod(lambda cls, *args, **kwargs: fake_save_scraped_players_batch(*args, **kwargs)))
+    monkeypatch.setattr(SyncService, "_sync_registered_players_batch", classmethod(lambda cls, *args, **kwargs: fake_sync_registered_players_batch(*args, **kwargs)))
+
+    service = SyncService(pool, "https://example.test")
+    service.scraper = FakeScraper(events)
+
+    asyncio.run(service.run_sync())
+
+    assert events == [
+        "scrape_tournaments",
+        ("upsert_tournaments_batch", ["League"]),
+        "session1:commit",
+        ("scrape_teams", ["League"]),
+        ("upsert_clubs_batch", ["Club A", "Club B"], {"League": 1}),
+        "session2:commit",
+        ("scrape_players_for_team", "Club A"),
+        ("save_scraped_players_batch", ["Club A"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        "session2:commit",
+        ("scrape_players_for_team", "Club B"),
+        ("save_scraped_players_batch", ["Club B"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        "session2:commit",
+        ("sync_registered_players_batch", ["Club A", "Club B"], ["Club A", "Club B"]),
+        "session2:commit",
+    ]
