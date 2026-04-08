@@ -79,7 +79,7 @@ The bot uses long polling. In local development, it can run without Redis by set
 
 ## Environment configuration
 
-Create a `.env` file in the project root. There is no committed `.env.example`, so the values below are the effective configuration surface used by the codebase.
+Create a `.env` file in the project root. You can use `.env.example` as the starting point and extend it with any deployment-specific values you need.
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
@@ -108,7 +108,7 @@ Notes:
 - `ADMIN_IDS` and `LEAGUE_ADMIN_IDS` are comma-separated Telegram user IDs.
 - Empty `SCRAPER_ALLOWED_TOURNAMENTS` means "scrape all discovered tournaments".
 - `SCRAPER_PLAYER_TOURNAMENT` can be used to target an exact player-stat tournament label.
-- Docker entrypoints run `alembic upgrade head` automatically on container start.
+- Database migrations are handled by a dedicated Compose `migrate` service.
 
 ## Recommended development setup
 
@@ -206,19 +206,35 @@ The manual checklist covers registration, instructions, ratings, transfers, admi
 The current project is already set up for containerized deployment:
 
 1. Provide a production `.env`.
-2. Run `docker compose up -d --build`.
-3. Verify container health and logs.
+2. Run `docker compose up --build migrate`.
+3. Run `docker compose up -d --build`.
+4. Verify container health and logs.
 
 Operational details:
 
-- database migrations run automatically on bot and scraper startup
+- database migrations run through the dedicated `migrate` service
 - bot state storage should use Redis in deployed environments
 - scraper sync interval is controlled by `SYNC_INTERVAL_HOURS`
 - PostgreSQL and Redis data are persisted with Docker volumes
+
+## CI/CD
+
+The repository includes a GitHub Actions deployment workflow:
+
+- workflow file: `.github/workflows/deploy.yml`
+- server deploy script: `scripts/deploy.sh`
+- setup guide: `docs/deployment.md`
+
+The default behavior is:
+
+- run tests on GitHub Actions
+- on push to `main`, connect to the Linux server over SSH
+- pull the latest code in the server checkout
+- run the `migrate` service once
+- start the long-lived services with `docker compose up -d --build --remove-orphans postgres redis tg_bot scraper`
 
 ## Additional repository notes
 
 - Main specification: `tech_task.pdf` (Russian)
 - Architecture reference for contributors: `CONTEXT.md`
 - User-facing strings are centralized in `football_bot/locales/messages.py`
-
