@@ -12,10 +12,11 @@ The workflow does two things:
 The deployment script updates the checked-out repository on the server and then runs:
 
 ```bash
-docker compose up -d --build --remove-orphans
+docker compose up --build migrate
+docker compose up -d --build --remove-orphans postgres redis tg_bot scraper
 ```
 
-This means the server builds the bot and scraper images locally from the repository checkout.
+This means the server builds the images locally from the repository checkout, applies migrations once, and only then starts the long-lived services.
 
 ## Files
 
@@ -73,5 +74,5 @@ For this repository, the current local branch is not `main`, so update the workf
 ## Notes
 
 - The deploy script uses `git pull --ff-only`, so it will fail instead of overwriting local server changes.
-- Database migrations run automatically because both container entrypoints call `alembic upgrade head`.
+- Database migrations run through the dedicated `migrate` service before the app containers are started.
 - The server must already have a valid `.env` file before the first deploy.

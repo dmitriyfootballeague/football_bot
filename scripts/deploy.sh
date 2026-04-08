@@ -23,6 +23,7 @@ git fetch origin "${BRANCH}"
 git checkout "${BRANCH}"
 git pull --ff-only origin "${BRANCH}"
 
-docker compose up -d --build --remove-orphans
+docker compose up --build migrate
+docker compose up -d --build --remove-orphans postgres redis tg_bot scraper
 
 echo "Deployment finished successfully."
