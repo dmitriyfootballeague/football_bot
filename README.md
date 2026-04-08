@@ -79,7 +79,7 @@ The bot uses long polling. In local development, it can run without Redis by set
 
 ## Environment configuration
 
-Create a `.env` file in the project root. There is no committed `.env.example`, so the values below are the effective configuration surface used by the codebase.
+Create a `.env` file in the project root. You can use `.env.example` as the starting point and extend it with any deployment-specific values you need.
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
@@ -216,9 +216,23 @@ Operational details:
 - scraper sync interval is controlled by `SYNC_INTERVAL_HOURS`
 - PostgreSQL and Redis data are persisted with Docker volumes
 
+## CI/CD
+
+The repository includes a GitHub Actions deployment workflow:
+
+- workflow file: `.github/workflows/deploy.yml`
+- server deploy script: `scripts/deploy.sh`
+- setup guide: `docs/deployment.md`
+
+The default behavior is:
+
+- run tests on GitHub Actions
+- on push to `main`, connect to the Linux server over SSH
+- pull the latest code in the server checkout
+- run `docker compose up -d --build --remove-orphans`
+
 ## Additional repository notes
 
 - Main specification: `tech_task.pdf` (Russian)
 - Architecture reference for contributors: `CONTEXT.md`
 - User-facing strings are centralized in `football_bot/locales/messages.py`
-
