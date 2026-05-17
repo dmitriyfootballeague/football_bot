@@ -361,6 +361,100 @@ def test_upsert_scraped_player_uses_postgres_on_conflict_update():
     assert "scraped_player_stats" in sql
 
 
+def test_find_registered_player_prefers_external_id_match():
+    external_match = make_player(
+        player_id=1,
+        telegram_id=101,
+        first_name="Ivan",
+        last_name="Petrov",
+    )
+    session = FakeSession(execute_results=[external_match])
+    scraped_player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="player-1",
+        team="Club A",
+        tournament="League",
+    )
+
+    player = asyncio.run(SyncService._find_registered_player(session, scraped_player))
+
+    assert player is external_match
+    assert len(session.executed_statements) == 1
+
+
+def test_find_registered_player_uses_name_and_club_before_name_only():
+    club_match = make_player(
+        player_id=2,
+        telegram_id=102,
+        first_name="Ivan",
+        last_name="Petrov",
+    )
+    session = FakeSession(execute_results=[None, [club_match]])
+    scraped_player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="player-2",
+        team="Club A",
+        tournament="League",
+    )
+
+    player = asyncio.run(SyncService._find_registered_player(session, scraped_player))
+
+    assert player is club_match
+    assert len(session.executed_statements) == 2
+
+
+def test_find_registered_player_falls_back_to_unique_name_only_match():
+    unique_name_match = make_player(
+        player_id=3,
+        telegram_id=103,
+        first_name="Petr",
+        last_name="Ivanov",
+    )
+    session = FakeSession(execute_results=[None, [], [unique_name_match]])
+    scraped_player = ScrapedPlayer(
+        first_name="Petr",
+        last_name="Ivanov",
+        external_id="player-3",
+        team="Unknown Club",
+        tournament="League",
+    )
+
+    player = asyncio.run(SyncService._find_registered_player(session, scraped_player))
+
+    assert player is unique_name_match
+    assert len(session.executed_statements) == 3
+
+
+def test_find_registered_player_returns_none_for_ambiguous_name_only_match():
+    first = make_player(
+        player_id=4,
+        telegram_id=104,
+        first_name="Sergey",
+        last_name="Sidorov",
+    )
+    second = make_player(
+        player_id=5,
+        telegram_id=105,
+        first_name="Sergey",
+        last_name="Sidorov",
+    )
+    session = FakeSession(execute_results=[None, [], [first, second]])
+    scraped_player = ScrapedPlayer(
+        first_name="Sergey",
+        last_name="Sidorov",
+        external_id="player-4",
+        team="Unknown Club",
+        tournament="League",
+    )
+
+    player = asyncio.run(SyncService._find_registered_player(session, scraped_player))
+
+    assert player is None
+    assert len(session.executed_statements) == 3
+
+
 def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeypatch):
     now = datetime.now(timezone.utc)
     player_a = make_player(player_id=1, telegram_id=101, first_name="Ivan", last_name="Petrov")
