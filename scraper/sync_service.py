@@ -328,12 +328,27 @@ class SyncService:
         player = result.scalar_one_or_none()
         if player:
             return player
+
+        stmt = select(Player).where(
+            Player.first_name == sp.first_name,
+            Player.last_name == sp.last_name,
+            Player.club.has(Club.name == sp.team),
+            Player.club.has(Club.tournament.has(Tournament.name == sp.tournament)),
+        )
+        result = await session.execute(stmt)
+        players = list(result.scalars().all())
+        if len(players) == 1:
+            return players[0]
+
         stmt = select(Player).where(
             Player.first_name == sp.first_name,
             Player.last_name == sp.last_name,
         )
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        players = list(result.scalars().all())
+        if len(players) == 1:
+            return players[0]
+        return None
 
     @staticmethod
     def _apply_current_player_data(
