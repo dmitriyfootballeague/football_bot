@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from sqlalchemy import Integer, String, ForeignKey
+from sqlalchemy import Enum, Integer, String, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .player import PlayerPosition
 from .base import Base, TimestampMixin
 
 
@@ -19,6 +20,9 @@ class ScrapedPlayerStats(TimestampMixin, Base):
     external_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    position: Mapped[PlayerPosition | None] = mapped_column(
+        Enum(PlayerPosition, values_callable=lambda e: [m.value for m in e]), nullable=True
+    )
     club_id: Mapped[int | None] = mapped_column(ForeignKey("clubs.id"), nullable=True)
 
     # Match statistics

@@ -12,7 +12,14 @@ from football_bot.models import (
     Tournament,
 )
 from scraper.scraped_data import ScrapedPlayer, ScrapedTeam, ScrapedTournament
-from scraper.sync_service import SyncService, _compute_rankings, _compute_total_points
+from scraper.scraped_data import ScrapedMatchPlayerStat
+from scraper.sync_service import (
+    SyncService,
+    _apply_match_stat_aggregates,
+    _compute_rankings,
+    _compute_total_points,
+    _resolve_club_id,
+)
 
 
 def make_player(
@@ -146,8 +153,30 @@ class FakeScraper:
         ]
         return current, previous
 
+    async def scrape_match_stats_for_tournament(self, tournament):
+        self.events.append(("scrape_match_stats_for_tournament", tournament.name))
+        return [
+            ScrapedMatchPlayerStat(
+                match_external_id="m1",
+                match_url="https://olesports.ru/match/m1",
+                tournament=tournament.name,
+                player_external_id="cA-cur",
+                player_name="Club A Cur",
+                team_name="Club A",
+                opponent_name="Club B",
+                is_home=True,
+                in_roster=True,
+                started=True,
+                mvp=False,
+                team_goals=2,
+                opponent_goals=0,
+                goals_conceded=0,
+                team_won=True,
+            )
+        ]
 
-def test_compute_total_points_prefers_scraped_rating():
+
+def test_compute_total_points_ignores_scraped_rating_without_fixed_position():
     player = ScrapedPlayer(
         first_name="Ivan",
         last_name="Petrov",
@@ -161,10 +190,10 @@ def test_compute_total_points_prefers_scraped_rating():
         rating=91.5,
     )
 
-    assert _compute_total_points(player) == 91.5
+    assert _compute_total_points(player) == 11
 
 
-def test_compute_total_points_falls_back_to_formula():
+def test_compute_total_points_uses_position_specific_scout_formula():
     player = ScrapedPlayer(
         first_name="Ivan",
         last_name="Petrov",
@@ -175,9 +204,91 @@ def test_compute_total_points_falls_back_to_formula():
         mvp_count=2,
         goals=3,
         assists=4,
+        position=PlayerPosition.DEFENSIVE_MIDFIELDER.value,
+        wins=5,
+        starts=6,
+        goals_conceded=12,
     )
 
-    assert _compute_total_points(player) == 17
+    assert _compute_total_points(player) == 69
+
+
+def test_compute_total_points_clamps_defensive_points_at_zero():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=1,
+        position=PlayerPosition.DEFENDER.value,
+        goals_conceded=10,
+    )
+
+    assert _compute_total_points(player) == 0
+
+
+def test_apply_match_stat_aggregates_adds_wins_starts_and_defensive_points():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        position=PlayerPosition.DEFENDER.value,
+    )
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id="m1",
+            match_url="https://olesports.ru/match/m1",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name="FC Other",
+            is_home=True,
+            in_roster=True,
+            started=True,
+            mvp=False,
+            team_goals=2,
+            opponent_goals=1,
+            goals_conceded=1,
+            team_won=True,
+        ),
+        ScrapedMatchPlayerStat(
+            match_external_id="m2",
+            match_url="https://olesports.ru/match/m2",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name="FC Other",
+            is_home=False,
+            in_roster=True,
+            started=False,
+            mvp=False,
+            team_goals=0,
+            opponent_goals=5,
+            goals_conceded=5,
+            team_won=False,
+        ),
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.wins == 1
+    assert player.starts == 1
+    assert player.goals_conceded == 6
+    assert player.defensive_points == 6
+    assert _compute_total_points(player) == 8
+
+
+def test_resolve_club_id_matches_team_name_case_insensitively():
+    club_map = {("League", "СБР-А сталь"): 10}
+
+    club_id = _resolve_club_id(club_map, "League", "СБР-А СТАЛЬ")
+
+    assert club_id == 10
 
 
 def test_compute_rankings_groups_by_tournament_and_computes_ranks():
@@ -230,10 +341,10 @@ def test_compute_rankings_groups_by_tournament_and_computes_ranks():
         "avg_points_per_game": 0.75,
     }
     assert rankings["p3"] == {
-        "current_rating": 50,
+        "current_rating": 0,
         "division_rank": 1,
         "division_total": 1,
-        "avg_points_per_game": 50.0,
+        "avg_points_per_game": 0.0,
     }
 
 
@@ -330,6 +441,30 @@ def test_save_scraped_players_batch_uses_tournament_and_club_map(monkeypatch):
     assert session.flush_calls == 1
 
 
+def test_apply_fixed_positions_uses_client_external_id_map():
+    players = [
+        ScrapedPlayer(
+            first_name="Dmitry",
+            last_name="Mironov",
+            external_id="62ffbb0eaa8c2e49e5f803ba",
+            team="Арктик",
+            tournament="League",
+        ),
+        ScrapedPlayer(
+            first_name="Unknown",
+            last_name="Player",
+            external_id="missing",
+            team="Арктик",
+            tournament="League",
+        ),
+    ]
+
+    SyncService._apply_fixed_positions(players)
+
+    assert players[0].position == PlayerPosition.ATTACKING_MIDFIELDER.value
+    assert players[1].position is None
+
+
 def test_upsert_scraped_player_uses_postgres_on_conflict_update():
     session = FakeSession()
     scraped_player = ScrapedPlayer(
@@ -359,6 +494,50 @@ def test_upsert_scraped_player_uses_postgres_on_conflict_update():
     assert "ON CONFLICT" in sql
     assert "DO UPDATE" in sql
     assert "scraped_player_stats" in sql
+    assert "position" in sql
+
+
+def test_upsert_match_player_stat_uses_postgres_on_conflict_update():
+    session = FakeSession()
+    stat = ScrapedMatchPlayerStat(
+        match_external_id="match-1",
+        match_url="https://olesports.ru/match/match-1",
+        tournament="League",
+        player_external_id="player-1",
+        player_name="Ivan Petrov",
+        team_name="Club A",
+        opponent_name="Club B",
+        is_home=True,
+        in_roster=True,
+        started=True,
+        mvp=True,
+        team_goals=2,
+        opponent_goals=1,
+        goals_conceded=1,
+        team_won=True,
+        match_date_label="05 апреля 2026",
+    )
+
+    asyncio.run(
+        SyncService._upsert_match_player_stat(
+            session,
+            stat,
+            tournament_id=7,
+            club_id=10,
+        )
+    )
+
+    assert len(session.executed_statements) == 1
+    sql = str(
+        session.executed_statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "ON CONFLICT" in sql
+    assert "DO UPDATE" in sql
+    assert "match_stats" in sql
+    assert "uq_match_stats_match_player" in sql
 
 
 def test_find_registered_player_prefers_external_id_match():
@@ -482,6 +661,7 @@ def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeyp
             goals=2,
             assists=1,
             mvp_count=1,
+            position=PlayerPosition.ATTACKING_MIDFIELDER.value,
         ),
         ScrapedPlayer(
             first_name="Petr",
@@ -493,6 +673,7 @@ def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeyp
             goals=1,
             assists=0,
             mvp_count=0,
+            position=PlayerPosition.DEFENDER.value,
         ),
     ]
     prev_players = [
@@ -537,12 +718,14 @@ def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeyp
     assert player_a.external_id == "cur-a"
     assert player_a.current_rating == 9
     assert player_b.current_rating == 3
+    assert player_a.position == PlayerPosition.ATTACKING_MIDFIELDER
+    assert player_b.position == PlayerPosition.DEFENDER
     assert player_a.position_rank == 1
-    assert player_b.position_rank == 2
+    assert player_b.position_rank == 1
     assert player_a.prev_season_rating == 11
     assert player_b.prev_season_rating == 4
     assert player_a.prev_position_rank == 1
-    assert player_b.prev_position_rank == 2
+    assert player_b.prev_position_rank == 1
     assert session.flush_calls == 1
 
 
@@ -564,6 +747,15 @@ def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
         events.append(("save_scraped_players_batch", [player.team for player in players], club_map))
         return len(players)
 
+    async def fake_save_match_stats_batch(session, match_stats, tournament_id, club_map):
+        events.append((
+            "save_match_stats_batch",
+            [stat.match_external_id for stat in match_stats],
+            tournament_id,
+            club_map,
+        ))
+        return len(match_stats)
+
     async def fake_sync_registered_players_batch(
         session, current_players, prev_players, ranking_map, prev_ranking_map, now
     ):
@@ -577,6 +769,7 @@ def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
     monkeypatch.setattr(SyncService, "_upsert_tournaments_batch", staticmethod(fake_upsert_tournaments_batch))
     monkeypatch.setattr(SyncService, "_upsert_clubs_batch", staticmethod(fake_upsert_clubs_batch))
     monkeypatch.setattr(SyncService, "_save_scraped_players_batch", classmethod(lambda cls, *args, **kwargs: fake_save_scraped_players_batch(*args, **kwargs)))
+    monkeypatch.setattr(SyncService, "_save_match_stats_batch", classmethod(lambda cls, *args, **kwargs: fake_save_match_stats_batch(*args, **kwargs)))
     monkeypatch.setattr(SyncService, "_sync_registered_players_batch", classmethod(lambda cls, *args, **kwargs: fake_sync_registered_players_batch(*args, **kwargs)))
 
     service = SyncService(pool, "https://example.test")
@@ -596,6 +789,9 @@ def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
         "session2:commit",
         ("scrape_players_for_team", "Club B"),
         ("save_scraped_players_batch", ["Club B"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        "session2:commit",
+        ("scrape_match_stats_for_tournament", "League"),
+        ("save_match_stats_batch", ["m1"], 1, {("League", "Club A"): 10, ("League", "Club B"): 20}),
         "session2:commit",
         ("sync_registered_players_batch", ["Club A", "Club B"], ["Club A", "Club B"]),
         "session2:commit",

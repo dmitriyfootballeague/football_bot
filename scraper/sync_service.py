@@ -1,5 +1,6 @@
 import asyncio
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -7,20 +8,112 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
 from scraper.league_scraper import LeagueScraper
-from scraper.scraped_data import ScrapedPlayer
-from football_bot.models import Club, Player, RegistrationStatus, ScrapedPlayerStats, Tournament
+from scraper.player_position_overrides import get_fixed_player_position
+from scraper.scraped_data import ScrapedMatchPlayerStat, ScrapedPlayer
+from football_bot.models import (
+    Club,
+    MatchPlayerStats,
+    Player,
+    PlayerPosition,
+    RegistrationStatus,
+    ScrapedPlayerStats,
+    Tournament,
+)
 from scraper.logging import logger
 
 
-def _compute_total_points(sp: ScrapedPlayer) -> float:
-    """Synthetic rating: goals×3 + assists + MVP×2.
+@dataclass(frozen=True)
+class _PositionScoring:
+    goal: int
+    assist: int
+    win: int
+    start: int
+    mvp: int
+    defensive_base: int | None = None
+    defensive_conceded_multiplier: int = 0
 
-    Used when the site does not expose a numeric rating directly.
-    Falls back to sp.rating if it was scraped from a rating column.
+
+_SCORING_BY_POSITION = {
+    PlayerPosition.FORWARD: _PositionScoring(goal=3, assist=3, win=1, start=1, mvp=1),
+    PlayerPosition.ATTACKING_MIDFIELDER: _PositionScoring(
+        goal=2,
+        assist=3,
+        win=1,
+        start=1,
+        mvp=1,
+        defensive_base=4,
+        defensive_conceded_multiplier=1,
+    ),
+    PlayerPosition.DEFENSIVE_MIDFIELDER: _PositionScoring(
+        goal=2,
+        assist=3,
+        win=1,
+        start=1,
+        mvp=1,
+        defensive_base=5,
+        defensive_conceded_multiplier=1,
+    ),
+    PlayerPosition.DEFENDER: _PositionScoring(
+        goal=1,
+        assist=3,
+        win=1,
+        start=1,
+        mvp=1,
+        defensive_base=8,
+        defensive_conceded_multiplier=2,
+    ),
+    PlayerPosition.GOALKEEPER: _PositionScoring(
+        goal=0,
+        assist=3,
+        win=2,
+        start=1,
+        mvp=1,
+        defensive_base=8,
+        defensive_conceded_multiplier=2,
+    ),
+}
+
+
+def _coerce_position(position: PlayerPosition | str | None) -> PlayerPosition | None:
+    if isinstance(position, PlayerPosition):
+        return position
+    if not position:
+        return None
+    try:
+        return PlayerPosition(position)
+    except ValueError:
+        return None
+
+
+def _compute_total_points(sp: ScrapedPlayer) -> float:
+    """Compute Scout points from fixed position and available stats.
+
+    Match-level wins, starts, conceded goals, and defensive points are optional
+    because the current scraper only exposes aggregate player stats.
     """
-    if sp.rating > 0:
-        return sp.rating
-    return sp.goals * 3 + sp.assists + sp.mvp_count * 2
+    position = _coerce_position(sp.position)
+    scoring = _SCORING_BY_POSITION.get(position)
+    if scoring is None:
+        return sp.goals * 3 + sp.assists + sp.mvp_count * 2
+
+    total = (
+        sp.goals * scoring.goal
+        + sp.assists * scoring.assist
+        + (sp.wins or 0) * scoring.win
+        + (sp.starts or 0) * scoring.start
+        + sp.mvp_count * scoring.mvp
+    )
+
+    if sp.defensive_points is not None:
+        total += max(sp.defensive_points, 0)
+    elif scoring.defensive_base is not None and sp.goals_conceded is not None:
+        defensive_points = (
+            sp.games_played * scoring.defensive_base
+            - sp.goals_conceded * scoring.defensive_conceded_multiplier
+        )
+        total += max(defensive_points, 0)
+
+    return total
 
 
 def _compute_rankings(players: list[ScrapedPlayer]) -> dict[str, dict]:
@@ -45,6 +138,54 @@ def _compute_rankings(players: list[ScrapedPlayer]) -> dict[str, dict]:
                 "avg_points_per_game": avg,
             }
     return stats
+
+
+def _apply_match_stat_aggregates(
+    players: list[ScrapedPlayer],
+    match_stats: list[ScrapedMatchPlayerStat],
+) -> None:
+    by_player: dict[str, list[ScrapedMatchPlayerStat]] = defaultdict(list)
+    for stat in match_stats:
+        by_player[stat.player_external_id].append(stat)
+
+    for player in players:
+        player_match_stats = by_player.get(player.external_id, [])
+        if not player_match_stats:
+            continue
+
+        player.wins = sum(1 for stat in player_match_stats if stat.team_won)
+        player.starts = sum(1 for stat in player_match_stats if stat.started)
+        player.goals_conceded = sum(stat.goals_conceded for stat in player_match_stats)
+
+        scoring = _SCORING_BY_POSITION.get(_coerce_position(player.position))
+        if scoring and scoring.defensive_base is not None:
+            player.defensive_points = sum(
+                max(
+                    scoring.defensive_base
+                    - stat.goals_conceded * scoring.defensive_conceded_multiplier,
+                    0,
+                )
+                for stat in player_match_stats
+            )
+
+
+def _resolve_club_id(
+    club_map: dict[tuple[str, str], int],
+    tournament_name: str,
+    team_name: str,
+) -> int | None:
+    club_id = club_map.get((tournament_name, team_name))
+    if club_id is not None:
+        return club_id
+
+    normalized_team_name = team_name.casefold()
+    for (mapped_tournament, mapped_team), mapped_club_id in club_map.items():
+        if (
+            mapped_tournament == tournament_name
+            and mapped_team.casefold() == normalized_team_name
+        ):
+            return mapped_club_id
+    return None
 
 
 class SyncService:
@@ -83,6 +224,7 @@ class SyncService:
         teams_by_tournament: dict[str, list] = defaultdict(list)
         for team in teams:
             teams_by_tournament[team.tournament].append(team)
+        tournaments_by_name = {tournament.name: tournament for tournament in tournaments}
 
         total_current_players = 0
         total_prev_players = 0
@@ -104,6 +246,8 @@ class SyncService:
 
                 for team in teams_by_tournament[tournament_name]:
                     current_group, prev_group = await self.scraper.scrape_players_for_team(team)
+                    self._apply_fixed_positions(current_group)
+                    self._apply_fixed_positions(prev_group)
                     tournament_current_players.extend(current_group)
                     tournament_prev_players.extend(prev_group)
                     total_current_players += len(current_group)
@@ -122,6 +266,23 @@ class SyncService:
                         f"{club_saved} scraped players saved"
                     )
 
+                match_stats: list[ScrapedMatchPlayerStat] = []
+                tournament = tournaments_by_name.get(tournament_name)
+                if tournament is not None:
+                    match_stats = await self.scraper.scrape_match_stats_for_tournament(tournament)
+                    match_rows_saved = await self._save_match_stats_batch(
+                        session=session,
+                        match_stats=match_stats,
+                        tournament_id=tournament_map[tournament_name],
+                        club_map=club_map,
+                    )
+                    await session.commit()
+                    logger.info(
+                        f"Tournament '{tournament_name}': "
+                        f"{match_rows_saved} match player rows saved"
+                    )
+
+                _apply_match_stat_aggregates(tournament_current_players, match_stats)
                 ranking_map = _compute_rankings(tournament_current_players)
                 prev_ranking_map = _compute_rankings(tournament_prev_players)
 
@@ -235,6 +396,29 @@ class SyncService:
         return saved
 
     @classmethod
+    async def _save_match_stats_batch(
+        cls,
+        session: AsyncSession,
+        match_stats: list[ScrapedMatchPlayerStat],
+        tournament_id: int,
+        club_map: dict[tuple[str, str], int],
+    ) -> int:
+        saved = 0
+        for stat in match_stats:
+            club_id = _resolve_club_id(club_map, stat.tournament, stat.team_name)
+            await cls._upsert_match_player_stat(session, stat, tournament_id, club_id)
+            saved += 1
+        await session.flush()
+        return saved
+
+    @staticmethod
+    def _apply_fixed_positions(players: list[ScrapedPlayer]) -> None:
+        for player in players:
+            fixed_position = get_fixed_player_position(player.external_id)
+            if fixed_position is not None:
+                player.position = fixed_position.value
+
+    @classmethod
     async def _sync_registered_players_batch(
         cls,
         session: AsyncSession,
@@ -274,6 +458,7 @@ class SyncService:
             computed = prev_ranking_map.get(sp.external_id, {})
             cls._apply_previous_player_data(
                 db_player=db_player,
+                scraped_player=sp,
                 computed=computed,
                 now=now,
             )
@@ -293,6 +478,7 @@ class SyncService:
             external_id=sp.external_id,
             first_name=sp.first_name,
             last_name=sp.last_name,
+            position=_coerce_position(sp.position),
             club_id=club_id,
             games_played=sp.games_played,
             mvp_count=sp.mvp_count,
@@ -307,6 +493,7 @@ class SyncService:
             set_={
                 "first_name": sp.first_name,
                 "last_name": sp.last_name,
+                "position": _coerce_position(sp.position),
                 "club_id": club_id,
                 "games_played": sp.games_played,
                 "mvp_count": sp.mvp_count,
@@ -316,6 +503,41 @@ class SyncService:
                 "red_cards": sp.red_cards,
                 "updated_at": now,
             },
+        )
+        await session.execute(stmt)
+
+    @staticmethod
+    async def _upsert_match_player_stat(
+        session: AsyncSession,
+        stat: ScrapedMatchPlayerStat,
+        tournament_id: int,
+        club_id: int | None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        values = {
+            "match_external_id": stat.match_external_id,
+            "match_url": stat.match_url,
+            "tournament_id": tournament_id,
+            "club_id": club_id,
+            "player_external_id": stat.player_external_id,
+            "player_name": stat.player_name,
+            "team_name": stat.team_name,
+            "opponent_name": stat.opponent_name,
+            "match_date_label": stat.match_date_label,
+            "is_home": stat.is_home,
+            "in_roster": stat.in_roster,
+            "started": stat.started,
+            "mvp": stat.mvp,
+            "team_won": stat.team_won,
+            "team_goals": stat.team_goals,
+            "opponent_goals": stat.opponent_goals,
+            "goals_conceded": stat.goals_conceded,
+            "updated_at": now,
+        }
+        stmt = pg_insert(MatchPlayerStats).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_match_stats_match_player",
+            set_=values,
         )
         await session.execute(stmt)
 
@@ -360,6 +582,10 @@ class SyncService:
         if not db_player.external_id:
             db_player.external_id = scraped_player.external_id
 
+        fixed_position = _coerce_position(scraped_player.position)
+        if fixed_position is not None:
+            db_player.position = fixed_position
+
         db_player.games_played = scraped_player.games_played
         db_player.mvp_count = scraped_player.mvp_count
         db_player.goals = scraped_player.goals
@@ -375,9 +601,14 @@ class SyncService:
     @staticmethod
     def _apply_previous_player_data(
         db_player: Player,
+        scraped_player: ScrapedPlayer,
         computed: dict,
         now: datetime,
     ) -> None:
+        fixed_position = _coerce_position(scraped_player.position)
+        if fixed_position is not None:
+            db_player.position = fixed_position
+
         db_player.prev_season_rating = computed.get("current_rating")
         db_player.prev_division_rank = computed.get("division_rank")
         db_player.prev_division_total = computed.get("division_total")

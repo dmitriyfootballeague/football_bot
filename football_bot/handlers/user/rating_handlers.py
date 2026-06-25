@@ -14,6 +14,8 @@ router = Router()
 POSITION_LABELS = {
     PlayerPosition.GOALKEEPER: "Вратарь",
     PlayerPosition.DEFENDER: "Защитник",
+    PlayerPosition.DEFENSIVE_MIDFIELDER: "Оборонительный полузащитник",
+    PlayerPosition.ATTACKING_MIDFIELDER: "Атакующий полузащитник",
     PlayerPosition.MIDFIELDER: "Полузащитник",
     PlayerPosition.FORWARD: "Нападающий",
 }

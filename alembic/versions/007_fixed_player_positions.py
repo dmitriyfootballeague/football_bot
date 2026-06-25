@@ -1,0 +1,390 @@
+"""add fixed player positions for Scout scoring
+
+Revision ID: 007
+Revises: 006
+Create Date: 2026-06-21
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = "007"
+down_revision: Union[str, None] = "006"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+PLAYER_POSITION_VALUES = (
+    "goalkeeper",
+    "defender",
+    "defensive_midfielder",
+    "attacking_midfielder",
+    "midfielder",
+    "forward",
+)
+
+# Keep this snapshot in the migration so historical upgrades stay deterministic
+# even if the runtime override module changes later.
+FIXED_PLAYER_POSITION_ROWS = """
+62ffbb0eaa8c2e49e5f803ba,attacking_midfielder
+62ff8afa5af15e2781704e00,attacking_midfielder
+6738b34d6060acdd39a54bf6,defensive_midfielder
+62fe5c3f34134c11a93cd25d,defender
+62ff817e5af15e27816faa9a,defender
+62ffb878aa8c2e49e5f7d759,attacking_midfielder
+62ff691b5af15e27816dec4f,defender
+65169ee2a675f44ead4314cf,goalkeeper
+62fe3b8060710a0b7a96827e,forward
+62ff83d95af15e27816fcd33,forward
+632393131ee2327f68624765,forward
+62fea1fb9c26801f955ed565,defender
+62ff74de5af15e27816ec9a3,defensive_midfielder
+645e1d92f0d92d249e11e43d,defender
+62ff91c75af15e278170bba8,defender
+62ff941b5af15e278170e524,defensive_midfielder
+632394531ee2327f6862526e,forward
+696abae8ca72060a93753261,defender
+62ffacce5af15e278172698c,goalkeeper
+69d040652a91fb06a9f2de2a,goalkeeper
+62ff40f5796bcd18bd21276a,forward
+62ff69a45af15e27816df427,defensive_midfielder
+62ff9e395af15e27817186c1,defender
+65aabf064deae5102bfaa6fc,forward
+688d1755179c910fe0ab31da,defensive_midfielder
+62ff952a5af15e278170f104,forward
+63a02d01bc190c30cc97fa14,attacking_midfielder
+6761d71541fb1e0efe561add,defender
+6323a1fd1ee2327f6862c434,defensive_midfielder
+632387ec1ee2327f6861ea8b,forward
+62ff9c2c5af15e2781716941,defensive_midfielder
+62ff90a75af15e278170a922,defender
+62ffaf845af15e2781729595,forward
+632392d91ee2327f68624569,forward
+62ffbae9aa8c2e49e5f80205,defensive_midfielder
+62ff90085af15e278170a36f,defender
+62ff3fa7796bcd18bd2112ae,attacking_midfielder
+63239bf31ee2327f6862931c,goalkeeper
+62ff84205af15e27816fd046,goalkeeper
+643ad686fc90755fdd5ade18,attacking_midfielder
+62ffb95faa8c2e49e5f7e702,defender
+62ffad105af15e2781726cf5,forward
+62ffac605af15e27817264d7,defensive_midfielder
+6554c5434e7c49ac7d2b0e63,defender
+69d0c432e9403d06875bb9e0,goalkeeper
+69d0ba142a91fb06a9f35390,attacking_midfielder
+667c76f0623eb98760a4e9dc,defender
+62ffae295af15e278172817d,attacking_midfielder
+62ffb3375af15e278172d5fd,defensive_midfielder
+643aaf3d95617d334d7ba3d5,attacking_midfielder
+62ff53a14e0d681d80aa918f,forward
+660bee637d615abd716cec5a,attacking_midfielder
+62fe409860710a0b7a96b300,forward
+667c771cc54339a10eb3dabb,attacking_midfielder
+6648fe76ba267541dd5b60f1,goalkeeper
+632399691ee2327f68627d74,forward
+62ff9dca5af15e278171802d,attacking_midfielder
+633bf92dd0a90c23ff37d679,defender
+62fead799c26801f955f4896,attacking_midfielder
+62ff3f4e796bcd18bd210c41,defensive_midfielder
+62ffbb14aa8c2e49e5f80410,defender
+62fe9f5e9c26801f955ec0a8,defender
+62ff62685af15e27816d7f9d,defensive_midfielder
+62fe9ee19c26801f955ebc1b,defensive_midfielder
+62ff847b5af15e27816fd48e,defender
+62ff891f5af15e2781702ce4,attacking_midfielder
+62fea9c29c26801f955f28cc,defender
+62feaa209c26801f955f2cea,attacking_midfielder
+62ff43bfa2d7241a65261bfe,defensive_midfielder
+62ffbb25aa8c2e49e5f80504,defensive_midfielder
+62ffbc8aaa8c2e49e5f81f87,attacking_midfielder
+667c792fa2cc3949f7282128,defensive_midfielder
+62feb0b49c26801f955f6e72,defensive_midfielder
+62fe3e0c60710a0b7a96983e,attacking_midfielder
+63239c1f1ee2327f68629489,defensive_midfielder
+64398520a27412646297eeb3,attacking_midfielder
+62fe98ca375a1c1d6366e18d,defensive_midfielder
+62fe57c834134c11a93ca32d,defender
+62feadbe9c26801f955f4b58,defender
+62ff92845af15e278170c7b0,goalkeeper
+62fe74b0ba2fdf174bb79244,forward
+62ffacf25af15e2781726b78,forward
+68a38bb9e93ba2a9ca3dec6b,forward
+62fe9b02375a1c1d6366f60a,attacking_midfielder
+632393cf1ee2327f68624e18,defensive_midfielder
+62ff6d9d5af15e27816e3ac6,defensive_midfielder
+62ff97bd5af15e2781711a2d,attacking_midfielder
+6918c949a89e0e7bea11b5c2,attacking_midfielder
+62feb1e89c26801f955f7a4e,defensive_midfielder
+62fe492060710a0b7a9704ef,defender
+62ff56124e0d681d80aab59a,defender
+62ffbb19aa8c2e49e5f80457,attacking_midfielder
+62fe9abf375a1c1d6366f400,forward
+62ff95895af15e278170f55f,defender
+62fe41d360710a0b7a96bd18,goalkeeper
+637c87cf0e28ed18cdea66bb,defensive_midfielder
+62ff84595af15e27816fd2e7,defensive_midfielder
+62ff8a3d5af15e2781703eed,forward
+62ff42bca2d7241a65261050,forward
+6323a0751ee2327f6862b7b4,defender
+62fe3d8a60710a0b7a9694f8,forward
+63239bf51ee2327f68629326,defender
+65169c8da675f44ead43050b,defensive_midfielder
+660a89dff8f98456aa9189b7,goalkeeper
+62ff9d215af15e27817175a0,defender
+62ff89205af15e2781702cee,defender
+62ff90225af15e278170a429,defender
+67f7d515f5381486e7421402,defensive_midfielder
+632396c71ee2327f686266ce,attacking_midfielder
+62ffab195af15e2781725328,attacking_midfielder
+6516b513a675f44ead43f9f2,forward
+62fe407660710a0b7a96b257,forward
+643937bc04ab3d76edbe0ff8,defensive_midfielder
+62ffb42e5af15e278172e822,defensive_midfielder
+62ff57d74e0d681d80aad162,attacking_midfielder
+62ffafa15af15e27817296c8,defender
+62ffafdc5af15e2781729a41,goalkeeper
+67fd3763ed6bb386d61cc83c,defender
+62ff71415af15e27816e7025,attacking_midfielder
+62ffad085af15e2781726c8e,attacking_midfielder
+6399a1e22839583707a4ea03,goalkeeper
+6859537e804ebd010273a39b,defender
+69a183a2ade398b0e191f583,defensive_midfielder
+6450e3162966ae024e91d1ce,forward
+63fc750d4d017d3f93a11256,forward
+6442d33adb0d4a2e1388c148,defensive_midfielder
+62ff95155af15e278170eff8,defender
+67f8eb76f5381486e7442e72,defensive_midfielder
+67f8eb76f5381486e7442e74,goalkeeper
+632395a11ee2327f68625e04,attacking_midfielder
+64ce35d34fa8b9201e525d20,defensive_midfielder
+69d0ba142a91fb06a9f35396,defender
+632395dd1ee2327f68625fe1,attacking_midfielder
+62ff6e645af15e27816e444a,attacking_midfielder
+667c6f8e623eb98760a4d577,attacking_midfielder
+661929782538eeb6f692d9a9,defender
+69d0ba142a91fb06a9f35394,defender
+6439b09dda107a1e92e48fe8,forward
+685e7877255db646ea585087,defensive_midfielder
+62fe54b134134c11a93c889e,defensive_midfielder
+62ffac815af15e2781726616,goalkeeper
+63239fac1ee2327f6862b1b0,defensive_midfielder
+69d0ba142a91fb06a9f35398,goalkeeper
+62ff40ed796bcd18bd2126f6,defender
+62ff41dc796bcd18bd213772,defender
+6554d7665547bc15f4226c80,defender
+685e7877255db646ea585089,defensive_midfielder
+63f4f95af64d54b8fe6c0924,attacking_midfielder
+62ff83d65af15e27816fcd1c,forward
+62feb16f9c26801f955f75b5,defender
+6323a4341ee2327f6862d67c,forward
+688d1eefee774c1000eb9599,attacking_midfielder
+62fe7637ba2fdf174bb7a0b2,defender
+62ff91c35af15e278170bb61,goalkeeper
+62ff91ec5af15e278170bdad,defensive_midfielder
+62fea3e49c26801f955ee910,defender
+62ff6ba55af15e27816e1dfc,defender
+67963e7c629d5c8729ea9e67,forward
+688d269dee774c1000eba2bb,defensive_midfielder
+69870026ca72060a93a8f2a1,defensive_midfielder
+62ff4d8e4e0d681d80aa2fa0,defensive_midfielder
+63239a951ee2327f68628769,forward
+62fea9f99c26801f955f2b32,defender
+637c86920e28ed18cdea5c2c,defensive_midfielder
+6554c65a4e7c49ac7d2b1019,attacking_midfielder
+673f33d96060acdd39b2ad98,defensive_midfielder
+62ffb87aaa8c2e49e5f7d76b,forward
+66178f6a3a4640b6f80f7094,attacking_midfielder
+66199ce7e0fc3302cc636e32,attacking_midfielder
+67fa1c5df5381486e746a5b9,attacking_midfielder
+62ff694e5af15e27816def08,attacking_midfielder
+63239c261ee2327f686294bd,defender
+6439ac8ada107a1e92e48112,defender
+62ffb2ce5af15e278172cf14,forward
+62ffbbc7aa8c2e49e5f80ec1,goalkeeper
+63d388a8f8a9f8170785d100,attacking_midfielder
+68b9e73c83a0fa598881efb4,defender
+62ff66485af15e27816dc6e6,goalkeeper
+62ffad175af15e2781726d50,attacking_midfielder
+69d1212271153d06a5de4d30,forward
+62ffac5a5af15e2781726499,attacking_midfielder
+62ff92045af15e278170bf30,attacking_midfielder
+62ff9c455af15e27817169f3,attacking_midfielder
+63f4f945f64d54b8fe6c0713,forward
+64cbce5b0809ca31ab8cf8f1,defender
+691827f3a89e0e7bea0ea122,defensive_midfielder
+62febf44b658972362670b17,attacking_midfielder
+62ffb1e95af15e278172bf28,defensive_midfielder
+632393d51ee2327f68624e4d,goalkeeper
+6973ca8ec8254e0a9a42e93f,defensive_midfielder
+62feb3789c26801f955f8b04,forward
+6973ca8ec8254e0a9a42e93d,attacking_midfielder
+62ff80bd5af15e27816f9b60,forward
+62ff8b9c5af15e27817057fc,forward
+64f0e84b59406568022dcafe,defensive_midfielder
+66196f0c2538eeb6f6938758,defensive_midfielder
+685e573e804ebd01027c8dd8,attacking_midfielder
+6323927d1ee2327f68624200,goalkeeper
+64576c21a41cec0e0d2669b9,attacking_midfielder
+62feb0ec9c26801f955f70be,defender
+63a02e46bc190c30cc980215,defender
+62ff4387a2d7241a652619e3,defensive_midfielder
+64ccd3d1bb9afa71da74a4dd,defender
+62ff8ad45af15e2781704bbb,attacking_midfielder
+62feba8bb65897236266d78e,defender
+62ff72e25af15e27816e9fe9,goalkeeper
+62fe97bb375a1c1d6366d9eb,forward
+643abdeacf04e02a13d3eb38,defender
+62fe9863375a1c1d6366df23,forward
+62feb587b65897236266a760,attacking_midfielder
+62ff95345af15e278170f158,defender
+63c3c25c7105781e1ee0b63b,defensive_midfielder
+6918b5302018a6760e46961b,defender
+62fe553234134c11a93c8bfe,forward
+643b00f5fc90755fdd5bd8b9,defender
+6738b5d46060acdd39a55716,defensive_midfielder
+68f2580036180c4bfc45a3ec,forward
+62ffa1715af15e278171bfd9,goalkeeper
+62ffb8b5aa8c2e49e5f7da4d,attacking_midfielder
+62ff58df4e0d681d80aaf436,forward
+6323a0a81ee2327f6862b937,defensive_midfielder
+62ff58c34e0d681d80aaf275,forward
+683a0e2f77577f99946bdc15,defensive_midfielder
+62ff7e855af15e27816f7845,defender
+62ff8e2c5af15e278170887b,defender
+63ee39ea1f8dfd8f3c35c3e1,defender
+62ff8d1f5af15e2781707828,defender
+62ff9de15af15e27817181a3,attacking_midfielder
+62ffbaeaaa8c2e49e5f8021c,defensive_midfielder
+6920b4df4d70db55115ad7b1,attacking_midfielder
+62ff8fa85af15e2781709b21,attacking_midfielder
+632383d21ee2327f6861c8f0,forward
+683a0e2f77577f99946bdc13,defender
+62ff946d5af15e278170e96d,defender
+62ff7e805af15e27816f77fc,defensive_midfielder
+62ff589a4e0d681d80aaefad,defender
+632388131ee2327f6861ebb9,goalkeeper
+62ffb27e5af15e278172ca88,forward
+62ff89635af15e2781703081,defender
+667c7d79c54339a10eb3e6d3,attacking_midfielder
+69a183a2ade398b0e191f581,defender
+62ff8aeb5af15e2781704d01,defensive_midfielder
+62ff7d315af15e27816f61fb,defensive_midfielder
+62ffb1a45af15e278172bb52,defensive_midfielder
+6439df66da107a1e92e51a08,defensive_midfielder
+6918ad8aacd22ab4b7082d98,forward
+62fe51bc34134c11a93c744d,defender
+63239b1d1ee2327f68628be4,defender
+62ff8cf95af15e278170759e,forward
+62fea8c39c26801f955f1fd9,defender
+63fc74df4d017d3f93a10dd6,defensive_midfielder
+62ff715d5af15e27816e71f2,forward
+67f994adf5381486e7461011,attacking_midfielder
+65b235d72b61ed5633d5b22c,defender
+62fe5bca34134c11a93ccfdb,defensive_midfielder
+62ff3eb9796bcd18bd210384,defensive_midfielder
+67445766b2749836b23574bc,defender
+62ff958f5af15e278170f5bd,forward
+6323835f1ee2327f6861c5b0,defender
+62ff8f6c5af15e278170976a,defender
+62fe410760710a0b7a96b610,goalkeeper
+62ffb97baa8c2e49e5f7e839,attacking_midfielder
+62fea01c9c26801f955ec767,defensive_midfielder
+62fea9869c26801f955f2675,defensive_midfielder
+62ff97a65af15e278171191f,defensive_midfielder
+62ffbc36aa8c2e49e5f819d3,attacking_midfielder
+632397531ee2327f68626b95,goalkeeper
+62fe9f969c26801f955ec277,attacking_midfielder
+62ff4e1a4e0d681d80aa36a8,attacking_midfielder
+69f2791cb2c23fc612b50c07,defender
+63577b218f2d8635e1852be9,defensive_midfielder
+62ff92065af15e278170bf3d,goalkeeper
+63239f971ee2327f6862b0fc,forward
+6a19fbdc9364361abafa022b,forward
+62ff66e05af15e27816dcf07,attacking_midfielder
+6918f17ab5652d7beb120de2,attacking_midfielder
+6557cad80f886f05103667cc,attacking_midfielder
+65df4e400074b13c29cb6e08,defender
+66acdccd9869cf5a9d816dae,forward
+64807505e547de1595f9dfcd,attacking_midfielder
+67fad0caf5381486e749eeaa,goalkeeper
+62fea8c19c26801f955f1fd4,defensive_midfielder
+62ff55b64e0d681d80aab085,defensive_midfielder
+6431579ff7804736495efd2a,defensive_midfielder
+67d44e4926a4b755b9e2a097,forward
+6739c9f06c77c8271d7791dd,defensive_midfielder
+67fad0dffe4cfc86d52eef80,defender
+6922c5fdb1695d628ae4bc0d,goalkeeper
+67fd32fcfe4cfc86d5381c02,goalkeeper
+696244cec8254e0a9a23c589,defensive_midfielder
+62ff8ea15af15e2781708de9,defender
+6619602da120d8b6f79ccc3b,defensive_midfielder
+6753eb8e84a335ef5465ded7,attacking_midfielder
+62feb2719c26801f955f7fdd,forward
+64f0f03a59406568022e12db,attacking_midfielder
+62ff892e5af15e2781702d8d,defensive_midfielder
+632384181ee2327f6861cafe,attacking_midfielder
+69302fc258630c3ed06bf231,forward
+62fea21c9c26801f955ed69a,defender
+62ff53f34e0d681d80aa95db,defender
+62ff59504e0d681d80aafb9e,goalkeeper
+6323841a1ee2327f6861cb08,defender
+67fa2cc8ed6bb386d610a40f,attacking_midfielder
+62fe5e5634134c11a93ce28b,attacking_midfielder
+62ffac395af15e2781726347,forward
+64326c1711e3506c846fb731,attacking_midfielder
+683ad98037ed1c999165c2f1,defender
+62ffae775af15e2781728404,defensive_midfielder
+626bcab8af7b581f4bf6ffd7,defender
+62ff53174e0d681d80aa8a99,forward
+63239c721ee2327f6862975a,defensive_midfielder
+64314bedf7804736495e2648,defender
+680c7fd7f9cf62a3ce749a00,goalkeeper
+6a19ef3d9364361abaf9d4b8,forward
+""".strip()
+
+
+def _iter_fixed_player_position_params() -> list[dict[str, str]]:
+    return [
+        {"external_id": external_id, "position": position}
+        for external_id, position in (
+            row.split(",", 1) for row in FIXED_PLAYER_POSITION_ROWS.splitlines()
+        )
+    ]
+
+
+def upgrade() -> None:
+    bind = op.get_bind()
+
+    if bind.dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute(
+                "ALTER TYPE playerposition ADD VALUE IF NOT EXISTS "
+                "'defensive_midfielder'"
+            )
+            op.execute(
+                "ALTER TYPE playerposition ADD VALUE IF NOT EXISTS "
+                "'attacking_midfielder'"
+            )
+
+    player_position = sa.Enum(*PLAYER_POSITION_VALUES, name="playerposition")
+    op.add_column(
+        "scraped_player_stats",
+        sa.Column("position", player_position, nullable=True),
+    )
+
+    update_scraped = sa.text(
+        "UPDATE scraped_player_stats SET position = :position WHERE external_id = :external_id"
+    )
+    update_registered = sa.text(
+        "UPDATE players SET position = :position WHERE external_id = :external_id"
+    )
+    for params in _iter_fixed_player_position_params():
+        bind.execute(update_scraped, params)
+        bind.execute(update_registered, params)
+
+
+def downgrade() -> None:
+    op.drop_column("scraped_player_stats", "position")

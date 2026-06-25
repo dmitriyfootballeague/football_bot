@@ -14,8 +14,33 @@ class ScrapedPlayer:
     assists: int = 0
     yellow_cards: int = 0
     red_cards: int = 0
+    position: str | None = None
+    wins: int | None = None
+    starts: int | None = None
+    goals_conceded: int | None = None
+    defensive_points: int | None = None
     # Site-provided rating (if available); 0.0 means not scraped yet
     rating: float = 0.0
+
+
+@dataclass
+class ScrapedMatchPlayerStat:
+    match_external_id: str
+    match_url: str
+    tournament: str
+    player_external_id: str
+    player_name: str
+    team_name: str
+    opponent_name: str
+    is_home: bool
+    in_roster: bool
+    started: bool
+    mvp: bool
+    team_goals: int
+    opponent_goals: int
+    goals_conceded: int
+    team_won: bool
+    match_date_label: str | None = None
 
 
 @dataclass

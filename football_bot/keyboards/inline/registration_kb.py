@@ -20,7 +20,8 @@ def create_position_kb() -> InlineKeyboardMarkup:
     positions = [
         ("Вратарь", "goalkeeper"),
         ("Защитник", "defender"),
-        ("Полузащитник", "midfielder"),
+        ("Оборонительный полузащитник", "defensive_midfielder"),
+        ("Атакующий полузащитник", "attacking_midfielder"),
         ("Нападающий", "forward"),
     ]
     for label, value in positions:

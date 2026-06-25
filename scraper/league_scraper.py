@@ -2,8 +2,14 @@ from playwright.async_api import async_playwright
 
 from scraper.discovery import discover_tournaments
 from scraper.logging import logger
+from scraper.match_scraper import scrape_tournament_match_stats
 from scraper.player_scraper import scrape_team_players
-from scraper.scraped_data import ScrapedPlayer, ScrapedTeam
+from scraper.scraped_data import (
+    ScrapedMatchPlayerStat,
+    ScrapedPlayer,
+    ScrapedTeam,
+    ScrapedTournament,
+)
 from scraper.team_scraper import scrape_tournament_teams
 
 
@@ -97,6 +103,12 @@ class LeagueScraper:
     ) -> tuple[list[ScrapedPlayer], list[ScrapedPlayer]]:
         async with async_playwright() as pw:
             return await self._scrape_players_for_team_with_pw(pw, team)
+
+    async def scrape_match_stats_for_tournament(
+        self, tournament: ScrapedTournament,
+    ) -> list[ScrapedMatchPlayerStat]:
+        async with async_playwright() as pw:
+            return await scrape_tournament_match_stats(pw, tournament)
 
     async def _scrape_players_for_team_with_pw(
         self, pw, team: ScrapedTeam,
