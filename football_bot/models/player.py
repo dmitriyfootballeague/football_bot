@@ -21,6 +21,8 @@ class PlayerRole(str, enum.Enum):
 class PlayerPosition(str, enum.Enum):
     GOALKEEPER = "goalkeeper"
     DEFENDER = "defender"
+    DEFENSIVE_MIDFIELDER = "defensive_midfielder"
+    ATTACKING_MIDFIELDER = "attacking_midfielder"
     MIDFIELDER = "midfielder"
     FORWARD = "forward"
 

@@ -4,6 +4,7 @@ from .club import Club
 from .player import Player, PlayerRole, PlayerPosition, RegistrationStatus
 from .transfer import TransferRequest, TransferType, TransferStatus
 from .scraped_stats import ScrapedPlayerStats
+from .match_stats import MatchPlayerStats
 
 __all__ = [
     "Base",
@@ -17,4 +18,5 @@ __all__ = [
     "TransferType",
     "TransferStatus",
     "ScrapedPlayerStats",
+    "MatchPlayerStats",
 ]
