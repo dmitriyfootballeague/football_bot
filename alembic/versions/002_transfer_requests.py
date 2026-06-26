@@ -17,6 +17,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = set(inspector.get_table_names())
+
     transfer_type = sa.Enum(
         "exit", "join", "invite",
         name="transfertype",
@@ -26,23 +30,31 @@ def upgrade() -> None:
         "pending_admin", "approved", "rejected",
         name="transferstatus",
     )
+    if bind.dialect.name == "postgresql":
+        transfer_type.create(bind, checkfirst=True)
+        transfer_status.create(bind, checkfirst=True)
 
-    op.create_table(
-        "transfer_requests",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("player_id", sa.Integer(), sa.ForeignKey("players.id"), nullable=False),
-        sa.Column("transfer_type", transfer_type, nullable=False),
-        sa.Column("status", transfer_status, nullable=False),
-        sa.Column("from_club_id", sa.Integer(), sa.ForeignKey("clubs.id"), nullable=True),
-        sa.Column("to_club_id", sa.Integer(), sa.ForeignKey("clubs.id"), nullable=True),
-        sa.Column("initiated_by", sa.BigInteger(), nullable=False),
-        sa.Column("rejected_by", sa.String(50), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_transfer_requests_player_id", "transfer_requests", ["player_id"])
-    op.create_index("ix_transfer_requests_status", "transfer_requests", ["status"])
+    if "transfer_requests" not in tables:
+        op.create_table(
+            "transfer_requests",
+            sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+            sa.Column("player_id", sa.Integer(), sa.ForeignKey("players.id"), nullable=False),
+            sa.Column("transfer_type", transfer_type, nullable=False),
+            sa.Column("status", transfer_status, nullable=False),
+            sa.Column("from_club_id", sa.Integer(), sa.ForeignKey("clubs.id"), nullable=True),
+            sa.Column("to_club_id", sa.Integer(), sa.ForeignKey("clubs.id"), nullable=True),
+            sa.Column("initiated_by", sa.BigInteger(), nullable=False),
+            sa.Column("rejected_by", sa.String(50), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
+            sa.PrimaryKeyConstraint("id"),
+        )
+
+    transfer_indexes = {index["name"] for index in sa.inspect(bind).get_indexes("transfer_requests")}
+    if "ix_transfer_requests_player_id" not in transfer_indexes:
+        op.create_index("ix_transfer_requests_player_id", "transfer_requests", ["player_id"])
+    if "ix_transfer_requests_status" not in transfer_indexes:
+        op.create_index("ix_transfer_requests_status", "transfer_requests", ["status"])
 
 
 def downgrade() -> None:

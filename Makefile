@@ -3,7 +3,8 @@
 VENV_SITE_PACKAGES := $(shell ls -d .venv/lib/python*/site-packages 2>/dev/null | head -n 1)
 
 up:
-	docker compose up -d
+	docker compose up --build migrate
+	docker compose up -d --build --remove-orphans postgres redis tg_bot scraper
 
 down:
 	docker compose down

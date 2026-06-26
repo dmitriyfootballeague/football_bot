@@ -17,12 +17,20 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("players", sa.Column("games_played", sa.Integer(), nullable=True))
-    op.add_column("players", sa.Column("mvp_count", sa.Integer(), nullable=True))
-    op.add_column("players", sa.Column("goals", sa.Integer(), nullable=True))
-    op.add_column("players", sa.Column("assists", sa.Integer(), nullable=True))
-    op.add_column("players", sa.Column("yellow_cards", sa.Integer(), nullable=True))
-    op.add_column("players", sa.Column("red_cards", sa.Integer(), nullable=True))
+    existing_columns = {
+        column["name"] for column in sa.inspect(op.get_bind()).get_columns("players")
+    }
+    columns = {
+        "games_played": sa.Column("games_played", sa.Integer(), nullable=True),
+        "mvp_count": sa.Column("mvp_count", sa.Integer(), nullable=True),
+        "goals": sa.Column("goals", sa.Integer(), nullable=True),
+        "assists": sa.Column("assists", sa.Integer(), nullable=True),
+        "yellow_cards": sa.Column("yellow_cards", sa.Integer(), nullable=True),
+        "red_cards": sa.Column("red_cards", sa.Integer(), nullable=True),
+    }
+    for column_name, column in columns.items():
+        if column_name not in existing_columns:
+            op.add_column("players", column)
 
 
 def downgrade() -> None:

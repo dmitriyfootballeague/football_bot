@@ -357,6 +357,8 @@ def _iter_fixed_player_position_params() -> list[dict[str, str]]:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = set(inspector.get_table_names())
 
     if bind.dialect.name == "postgresql":
         with op.get_context().autocommit_block():
@@ -370,10 +372,16 @@ def upgrade() -> None:
             )
 
     player_position = sa.Enum(*PLAYER_POSITION_VALUES, name="playerposition")
-    op.add_column(
-        "scraped_player_stats",
-        sa.Column("position", player_position, nullable=True),
+    scraped_columns = (
+        {column["name"] for column in inspector.get_columns("scraped_player_stats")}
+        if "scraped_player_stats" in tables
+        else set()
     )
+    if "scraped_player_stats" in tables and "position" not in scraped_columns:
+        op.add_column(
+            "scraped_player_stats",
+            sa.Column("position", player_position, nullable=True),
+        )
 
     update_scraped = sa.text(
         "UPDATE scraped_player_stats SET position = :position WHERE external_id = :external_id"
@@ -382,7 +390,8 @@ def upgrade() -> None:
         "UPDATE players SET position = :position WHERE external_id = :external_id"
     )
     for params in _iter_fixed_player_position_params():
-        bind.execute(update_scraped, params)
+        if "scraped_player_stats" in tables:
+            bind.execute(update_scraped, params)
         bind.execute(update_registered, params)
 
 
