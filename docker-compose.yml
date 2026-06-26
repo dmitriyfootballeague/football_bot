@@ -1,6 +1,7 @@
 services:
     postgres:
-        image: postgres:17.1-alpine
+        build:
+            dockerfile: Dockerfile.postgres
         container_name: postgres
         restart: always
         env_file: .env
@@ -16,7 +17,7 @@ services:
         volumes:
             - postgres-data:/var/lib/postgresql/data
         healthcheck:
-            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USERNAME} -d ${POSTGRES_DB}"]
+            test: ["CMD-SHELL", "test -f /tmp/postgres-password-synced && pg_isready -h 127.0.0.1 -U ${POSTGRES_USERNAME} -d ${POSTGRES_DB}"]
             interval: 5s
             timeout: 5s
             retries: 5

@@ -1,0 +1,7 @@
+FROM postgres:17.1-alpine
+
+COPY scripts/postgres-password-entrypoint.sh /usr/local/bin/postgres-password-entrypoint.sh
+RUN chmod +x /usr/local/bin/postgres-password-entrypoint.sh
+
+ENTRYPOINT ["postgres-password-entrypoint.sh"]
+CMD ["postgres"]
