@@ -52,7 +52,7 @@ if [ "${1:-}" = "postgres" ]; then
         -v role_password="${POSTGRES_PASSWORD}" <<'SQL'
 SET password_encryption = 'scram-sha-256';
 SELECT format(
-  'ALTER ROLE %I WITH PASSWORD %L',
+  'ALTER ROLE %I WITH LOGIN PASSWORD %L',
   :'role_name',
   :'role_password'
 ) \gexec
