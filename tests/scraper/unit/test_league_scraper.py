@@ -147,6 +147,15 @@ def test_resolve_player_tournament_supports_explicit_placeholder():
     assert resolved == "Высший (Лига 8x8, 2025/2026)"
 
 
+def test_resolve_player_tournament_does_not_split_plain_hyphenated_division_name():
+    resolved = _resolve_player_tournament(
+        "Премьер-Лига",
+        "Высший (Лига 8x8, 2025/2026)",
+    )
+
+    assert resolved == "Высший (Лига 8x8, 2025/2026)"
+
+
 def test_scrape_players_for_team_returns_empty_for_team_without_url(monkeypatch):
     monkeypatch.setattr(
         "scraper.league_scraper.async_playwright",

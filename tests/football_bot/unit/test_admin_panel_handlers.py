@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from football_bot.models import Club, ScrapedPlayerStats, Tournament
 from football_bot.handlers.admin import admin_panel_handlers
 from football_bot.keyboards.inline.admin_panel_kb import (
     AdminClubCallback,
@@ -9,7 +12,7 @@ from football_bot.states import FSMAdminEditClub, FSMAdminEditRating
 
 
 def test_admin_panel_shows_header(run_async, message_factory):
-    message = message_factory(text="/panel")
+    message = message_factory(text="/admin")
 
     run_async(admin_panel_handlers.admin_panel(message))
 
@@ -265,3 +268,69 @@ def test_admin_edit_rating_value_updates_current_rating(monkeypatch, run_async, 
     assert message.answers == [
         {"text": msg.ADMIN_RATING_UPDATED.format(name="Ivan Petrov", rating=88.2), "reply_markup": None}
     ]
+
+
+def test_build_scraped_players_export_includes_rating_columns(run_async):
+    tournament = Tournament(id=3, name="Суперлига — Премьер-Лига")
+    club = Club(id=5, name="Юнитек", tournament_id=3)
+    club.tournament = tournament
+    player = ScrapedPlayerStats(
+        id=7,
+        external_id="ext-7",
+        first_name="Ivan",
+        last_name="Petrov",
+        club_id=5,
+        games_played=12,
+        mvp_count=2,
+        goals=4,
+        assists=5,
+        yellow_cards=1,
+        red_cards=0,
+        current_rating=24.5,
+        division_rank=8,
+        division_total=30,
+        avg_points_per_game=2.04,
+    )
+    player.club = club
+    player.created_at = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
+    player.updated_at = datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc)
+
+    class FakeScalarResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        async def execute(self, _stmt):
+            return FakeScalarResult([player])
+
+    filename, payload, row_count = run_async(
+        admin_panel_handlers._build_scraped_players_export(FakeSession())
+    )
+
+    text = payload.decode("utf-8-sig")
+    assert filename.startswith("scraped_players_stats_")
+    assert row_count == 1
+    assert "current_rating,division_rank,division_total,avg_points_per_game" in text
+    assert "24.5,8,30,2.04" in text
+    assert "Юнитек" in text
+    assert "Суперлига — Премьер-Лига" in text
+
+
+def test_admin_export_all_players_sends_document(monkeypatch, run_async, callback_factory):
+    async def fake_build(_session):
+        return "players.csv", b"id,current_rating\n1,12.5\n", 1
+
+    monkeypatch.setattr(admin_panel_handlers, "_build_scraped_players_export", fake_build)
+    callback = callback_factory(user_id=1017)
+
+    run_async(admin_panel_handlers.admin_export_all_players(callback, session=object()))
+
+    assert callback.message.documents[0]["caption"] == msg.ADMIN_ALL_PLAYERS_EXPORTED.format(count=1)
+    assert callback.message.documents[0]["document"].filename == "players.csv"
+    assert callback.answers == [{"text": None, "show_alert": False}]
