@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+
+from football_bot.models import Club, ScrapedPlayerStats, Tournament
 from football_bot.handlers.admin import admin_panel_handlers
 from football_bot.keyboards.inline.admin_panel_kb import (
     AdminClubCallback,
@@ -8,8 +11,16 @@ from football_bot.locales import messages as msg
 from football_bot.states import FSMAdminEditClub, FSMAdminEditRating
 
 
+def _button_callback_data(markup):
+    return [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+    ]
+
+
 def test_admin_panel_shows_header(run_async, message_factory):
-    message = message_factory(text="/panel")
+    message = message_factory(text="/admin")
 
     run_async(admin_panel_handlers.admin_panel(message))
 
@@ -53,6 +64,9 @@ def test_admin_edit_club_start_sets_choose_state(monkeypatch, run_async, callbac
 
     assert callback.message.answers[0]["text"] == msg.ADMIN_CHOOSE_CLUB
     assert callback.message.answers[0]["reply_markup"] is not None
+    assert _button_callback_data(callback.message.answers[0]["reply_markup"])[-1] == (
+        AdminPanelAction(action="cancel").pack()
+    )
     assert state.current_state == FSMAdminEditClub.choose_club
 
 
@@ -87,7 +101,11 @@ def test_admin_edit_club_name_validates_blank_input(run_async, message_factory, 
 
     run_async(admin_panel_handlers.admin_edit_club_name(message, state, session=object()))
 
-    assert message.answers == [{"text": msg.ADMIN_ENTER_CLUB_NAME, "reply_markup": None}]
+    assert message.answers[0]["text"] == msg.ADMIN_ENTER_CLUB_NAME
+    assert message.answers[0]["reply_markup"] is not None
+    assert _button_callback_data(message.answers[0]["reply_markup"]) == [
+        AdminPanelAction(action="cancel").pack()
+    ]
     assert state.cleared is False
 
 
@@ -161,6 +179,9 @@ def test_admin_edit_rating_start_stores_rating_field(monkeypatch, run_async, cal
     )
 
     assert callback.message.answers[0]["text"] == msg.ADMIN_CHOOSE_PLAYER
+    assert _button_callback_data(callback.message.answers[0]["reply_markup"])[-1] == (
+        AdminPanelAction(action="cancel").pack()
+    )
     assert state.data["rating_field"] == "edit_prev_rating"
     assert state.current_state == FSMAdminEditRating.choose_player
 
@@ -191,8 +212,9 @@ def test_admin_edit_rating_chosen_uses_prev_rating_prompt(monkeypatch, run_async
 
     assert state.data["player_id"] == 15
     assert state.current_state == FSMAdminEditRating.enter_rating
-    assert callback.message.answers == [
-        {"text": msg.ADMIN_ENTER_PREV_RATING.format(name="Ivan Petrov"), "reply_markup": None}
+    assert callback.message.answers[0]["text"] == msg.ADMIN_ENTER_PREV_RATING.format(name="Ivan Petrov")
+    assert _button_callback_data(callback.message.answers[0]["reply_markup"]) == [
+        AdminPanelAction(action="cancel").pack()
     ]
 
 
@@ -202,8 +224,24 @@ def test_admin_edit_rating_value_rejects_invalid_number(run_async, message_facto
 
     run_async(admin_panel_handlers.admin_edit_rating_value(message, state, session=object()))
 
-    assert message.answers == [{"text": msg.ADMIN_INVALID_RATING, "reply_markup": None}]
+    assert message.answers[0]["text"] == msg.ADMIN_INVALID_RATING
+    assert _button_callback_data(message.answers[0]["reply_markup"]) == [
+        AdminPanelAction(action="cancel").pack()
+    ]
     assert state.cleared is False
+
+
+def test_admin_cancel_action_clears_state_and_returns_panel(run_async, callback_factory, state_factory):
+    callback = callback_factory(user_id=1016)
+    state = state_factory({"club_id": 8})
+    run_async(state.set_state(FSMAdminEditClub.enter_new_name))
+
+    run_async(admin_panel_handlers.admin_cancel_action(callback, state))
+
+    assert state.cleared is True
+    assert callback.message.answers[0]["text"] == msg.ADMIN_ACTION_CANCELLED
+    assert callback.message.answers[0]["reply_markup"] is not None
+    assert callback.answers == [{"text": None, "show_alert": False}]
 
 
 def test_admin_edit_rating_value_updates_prev_rating(monkeypatch, run_async, message_factory, state_factory, player_factory):
@@ -265,3 +303,69 @@ def test_admin_edit_rating_value_updates_current_rating(monkeypatch, run_async, 
     assert message.answers == [
         {"text": msg.ADMIN_RATING_UPDATED.format(name="Ivan Petrov", rating=88.2), "reply_markup": None}
     ]
+
+
+def test_build_scraped_players_export_includes_rating_columns(run_async):
+    tournament = Tournament(id=3, name="Суперлига — Премьер-Лига")
+    club = Club(id=5, name="Юнитек", tournament_id=3)
+    club.tournament = tournament
+    player = ScrapedPlayerStats(
+        id=7,
+        external_id="ext-7",
+        first_name="Ivan",
+        last_name="Petrov",
+        club_id=5,
+        games_played=12,
+        mvp_count=2,
+        goals=4,
+        assists=5,
+        yellow_cards=1,
+        red_cards=0,
+        current_rating=24.5,
+        division_rank=8,
+        division_total=30,
+        avg_points_per_game=2.04,
+    )
+    player.club = club
+    player.created_at = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
+    player.updated_at = datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc)
+
+    class FakeScalarResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class FakeSession:
+        async def execute(self, _stmt):
+            return FakeScalarResult([player])
+
+    filename, payload, row_count = run_async(
+        admin_panel_handlers._build_scraped_players_export(FakeSession())
+    )
+
+    text = payload.decode("utf-8-sig")
+    assert filename.startswith("scraped_players_stats_")
+    assert row_count == 1
+    assert "current_rating,division_rank,division_total,avg_points_per_game" in text
+    assert "24.5,8,30,2.04" in text
+    assert "Юнитек" in text
+    assert "Суперлига — Премьер-Лига" in text
+
+
+def test_admin_export_all_players_sends_document(monkeypatch, run_async, callback_factory):
+    async def fake_build(_session):
+        return "players.csv", b"id,current_rating\n1,12.5\n", 1
+
+    monkeypatch.setattr(admin_panel_handlers, "_build_scraped_players_export", fake_build)
+    callback = callback_factory(user_id=1017)
+
+    run_async(admin_panel_handlers.admin_export_all_players(callback, session=object()))
+
+    assert callback.message.documents[0]["caption"] == msg.ADMIN_ALL_PLAYERS_EXPORTED.format(count=1)
+    assert callback.message.documents[0]["document"].filename == "players.csv"
+    assert callback.answers == [{"text": None, "show_alert": False}]

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+MIGRATIONS_DIR = Path(__file__).resolve().parents[3] / "alembic" / "versions"
 
 
 def _load_migration(filename: str):
@@ -222,3 +222,27 @@ def test_migration_009_upgrade_adds_kick_enum_value(monkeypatch):
     assert fake_op.executed_sql == [
         "ALTER TYPE transfertype ADD VALUE IF NOT EXISTS 'kick'"
     ]
+
+
+def test_migration_010_upgrade_skips_existing_rating_columns(monkeypatch):
+    module = _load_migration("010_scraped_player_ratings.py")
+    bind = FakeBind()
+    fake_op = FakeOp(bind)
+    inspector = FakeInspector(
+        tables=["scraped_player_stats"],
+        columns={
+            "scraped_player_stats": [
+                {"name": "id"},
+                {"name": "current_rating"},
+                {"name": "division_rank"},
+                {"name": "division_total"},
+                {"name": "avg_points_per_game"},
+            ]
+        },
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+    monkeypatch.setattr(module.sa, "inspect", lambda _bind: inspector)
+
+    module.upgrade()
+
+    assert fake_op.added_columns == []

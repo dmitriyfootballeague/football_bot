@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 revision: str = "002"
 down_revision: Union[str, None] = "001"
@@ -21,14 +22,23 @@ def upgrade() -> None:
     inspector = sa.inspect(bind)
     tables = set(inspector.get_table_names())
 
-    transfer_type = sa.Enum(
+    if bind.dialect.name == "postgresql":
+        enum_type = postgresql.ENUM
+        enum_kwargs = {"create_type": False}
+    else:
+        enum_type = sa.Enum
+        enum_kwargs = {}
+
+    transfer_type = enum_type(
         "exit", "join", "invite",
         name="transfertype",
+        **enum_kwargs,
     )
-    transfer_status = sa.Enum(
+    transfer_status = enum_type(
         "pending_captain", "pending_player", "pending_captain_confirm",
         "pending_admin", "approved", "rejected",
         name="transferstatus",
+        **enum_kwargs,
     )
     if bind.dialect.name == "postgresql":
         transfer_type.create(bind, checkfirst=True)

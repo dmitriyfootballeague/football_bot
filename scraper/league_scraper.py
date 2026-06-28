@@ -17,8 +17,8 @@ def _extract_division_name(tournament_name: str) -> str | None:
     if "—" in tournament_name:
         division = tournament_name.split("—", 1)[1].strip()
         return division or None
-    if "-" in tournament_name:
-        division = tournament_name.split("-", 1)[1].strip()
+    if " - " in tournament_name:
+        division = tournament_name.split(" - ", 1)[1].strip()
         return division or None
     return None
 

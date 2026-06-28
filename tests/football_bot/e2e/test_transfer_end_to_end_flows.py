@@ -1,3 +1,5 @@
+import pytest
+
 from football_bot.handlers.admin import transfer_admin_handlers
 from football_bot.handlers.user import transfer_handlers
 from football_bot.keyboards.inline.registration_kb import ClubCallback
@@ -9,6 +11,8 @@ from football_bot.keyboards.inline.transfer_kb import (
 )
 from football_bot.locales import messages as msg
 from football_bot.models import PlayerRole, TransferRequest, TransferStatus, TransferType
+
+pytestmark = pytest.mark.e2e
 
 
 ACTIVE_STATUSES = {

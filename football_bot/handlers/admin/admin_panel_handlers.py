@@ -1,17 +1,23 @@
+import csv
+import io
 from datetime import datetime, timezone
 
 from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from football_bot.filters.is_admin import IsAnyAdminFilter
 from football_bot.keyboards.inline.admin_panel_kb import (
     AdminPanelAction, AdminClubCallback, AdminPlayerCallback,
-    create_admin_panel_kb, create_admin_clubs_kb, create_admin_players_kb,
+    create_admin_cancel_kb, create_admin_panel_kb,
+    create_admin_clubs_kb, create_admin_players_kb,
 )
 from football_bot.locales import messages as msg
+from football_bot.models import Club, ScrapedPlayerStats
 from football_bot.repository import ClubRepository, PlayerRepository
 from football_bot.states import FSMAdminEditClub, FSMAdminEditRating
 
@@ -20,10 +26,105 @@ router = Router()
 router.message.filter(IsAnyAdminFilter())
 router.callback_query.filter(IsAnyAdminFilter())
 
+ADMIN_EDIT_STATES = (
+    FSMAdminEditClub.choose_club,
+    FSMAdminEditClub.enter_new_name,
+    FSMAdminEditRating.choose_player,
+    FSMAdminEditRating.enter_rating,
+)
 
-@router.message(Command("panel"))
+
+async def _build_scraped_players_export(session: AsyncSession) -> tuple[str, bytes, int]:
+    stmt = (
+        select(ScrapedPlayerStats)
+        .options(
+            selectinload(ScrapedPlayerStats.club).selectinload(Club.tournament)
+        )
+        .order_by(ScrapedPlayerStats.id)
+    )
+    result = await session.execute(stmt)
+    scraped_players = list(result.scalars().all())
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "id",
+        "external_id",
+        "first_name",
+        "last_name",
+        "position",
+        "club_id",
+        "club_name",
+        "tournament_name",
+        "games_played",
+        "mvp_count",
+        "goals",
+        "assists",
+        "yellow_cards",
+        "red_cards",
+        "current_rating",
+        "division_rank",
+        "division_total",
+        "avg_points_per_game",
+        "created_at",
+        "updated_at",
+    ])
+    for player in scraped_players:
+        club = player.club
+        tournament = club.tournament if club else None
+        writer.writerow([
+            player.id,
+            player.external_id,
+            player.first_name,
+            player.last_name,
+            player.position.value if player.position else "",
+            player.club_id or "",
+            club.name if club else "",
+            tournament.name if tournament else "",
+            player.games_played,
+            player.mvp_count,
+            player.goals,
+            player.assists,
+            player.yellow_cards,
+            player.red_cards,
+            player.current_rating if player.current_rating is not None else "",
+            player.division_rank if player.division_rank is not None else "",
+            player.division_total if player.division_total is not None else "",
+            player.avg_points_per_game if player.avg_points_per_game is not None else "",
+            player.created_at.isoformat() if player.created_at else "",
+            player.updated_at.isoformat() if player.updated_at else "",
+        ])
+
+    filename = f"scraped_players_stats_{datetime.now(timezone.utc).date().isoformat()}.csv"
+    return filename, output.getvalue().encode("utf-8-sig"), len(scraped_players)
+
+
+@router.message(Command("admin"))
 async def admin_panel(message: Message):
     await message.answer(msg.ADMIN_PANEL_HEADER, reply_markup=create_admin_panel_kb())
+
+
+@router.callback_query(
+    AdminPanelAction.filter(F.action == "cancel"),
+    StateFilter(*ADMIN_EDIT_STATES),
+)
+async def admin_cancel_action(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(
+        msg.ADMIN_ACTION_CANCELLED,
+        reply_markup=create_admin_panel_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(AdminPanelAction.filter(F.action == "export_all_players"))
+async def admin_export_all_players(callback: CallbackQuery, session: AsyncSession):
+    filename, payload, row_count = await _build_scraped_players_export(session)
+    await callback.message.answer_document(
+        BufferedInputFile(payload, filename=filename),
+        caption=msg.ADMIN_ALL_PLAYERS_EXPORTED.format(count=row_count),
+    )
+    await callback.answer()
 
 
 # ========== EDIT CLUB NAME ==========
@@ -54,7 +155,10 @@ async def admin_edit_club_chosen(
         return
 
     await state.update_data(club_id=callback_data.club_id)
-    await callback.message.answer(msg.ADMIN_ENTER_CLUB_NAME)
+    await callback.message.answer(
+        msg.ADMIN_ENTER_CLUB_NAME,
+        reply_markup=create_admin_cancel_kb(),
+    )
     await state.set_state(FSMAdminEditClub.enter_new_name)
     await callback.answer()
 
@@ -63,7 +167,10 @@ async def admin_edit_club_chosen(
 async def admin_edit_club_name(message: Message, state: FSMContext, session: AsyncSession):
     new_name = message.text.strip() if message.text else ""
     if not new_name:
-        await message.answer(msg.ADMIN_ENTER_CLUB_NAME)
+        await message.answer(
+            msg.ADMIN_ENTER_CLUB_NAME,
+            reply_markup=create_admin_cancel_kb(),
+        )
         return
 
     data = await state.get_data()
@@ -120,7 +227,10 @@ async def admin_edit_rating_chosen(
         if rating_field == "edit_prev_rating"
         else msg.ADMIN_ENTER_RATING
     )
-    await callback.message.answer(prompt.format(name=name))
+    await callback.message.answer(
+        prompt.format(name=name),
+        reply_markup=create_admin_cancel_kb(),
+    )
     await state.set_state(FSMAdminEditRating.enter_rating)
     await callback.answer()
 
@@ -130,7 +240,10 @@ async def admin_edit_rating_value(message: Message, state: FSMContext, session: 
     try:
         new_rating = float(message.text.strip().replace(",", "."))
     except (ValueError, AttributeError):
-        await message.answer(msg.ADMIN_INVALID_RATING)
+        await message.answer(
+            msg.ADMIN_INVALID_RATING,
+            reply_markup=create_admin_cancel_kb(),
+        )
         return
 
     data = await state.get_data()

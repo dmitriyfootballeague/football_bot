@@ -191,7 +191,7 @@ Expected:
 ### 3.3 Admin panel rating edits
 
 Steps:
-- Admin sends `/panel`.
+- Admin sends `/admin`.
 - Change current rating for a player.
 - Change previous-season rating for a free agent or player.
 
@@ -408,8 +408,8 @@ Expected:
 ### 10.1 Access control
 
 Steps:
-- Non-admin sends `/panel`.
-- Admin sends `/panel`.
+- Non-admin sends `/admin`.
+- Admin sends `/admin`.
 
 Expected:
 - Non-admin cannot use the panel.

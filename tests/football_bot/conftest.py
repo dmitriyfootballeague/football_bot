@@ -40,6 +40,7 @@ class FakeBot:
 class FakeMessage:
     def __init__(self):
         self.answers = []
+        self.documents = []
         self.edited_reply_markup = []
         self.edited_text = []
         self.edited_caption = []
@@ -48,6 +49,15 @@ class FakeMessage:
         self.answers.append(
             {
                 "text": text,
+                "reply_markup": reply_markup,
+            }
+        )
+
+    async def answer_document(self, document, caption=None, reply_markup=None):
+        self.documents.append(
+            {
+                "document": document,
+                "caption": caption,
                 "reply_markup": reply_markup,
             }
         )
@@ -78,11 +88,21 @@ class FakeUserMessage:
         self.photo = photo or []
         self.from_user = SimpleNamespace(id=user_id, username=username)
         self.answers = []
+        self.documents = []
 
     async def answer(self, text, reply_markup=None):
         self.answers.append(
             {
                 "text": text,
+                "reply_markup": reply_markup,
+            }
+        )
+
+    async def answer_document(self, document, caption=None, reply_markup=None):
+        self.documents.append(
+            {
+                "document": document,
+                "caption": caption,
                 "reply_markup": reply_markup,
             }
         )
