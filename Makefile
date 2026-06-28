@@ -1,10 +1,16 @@
-.PHONY: up up-scraper down build restart logs ps migrate shell-bot shell-db test-bot test-bot-unit test-bot-smoke test-bot-e2e test-scraper test-scraper-unit
+.PHONY: up up-scraper build-scraper down build restart logs ps migrate shell-bot shell-db test-bot test-bot-unit test-bot-smoke test-bot-e2e test-scraper test-scraper-unit
 
 VENV_SITE_PACKAGES := $(shell ls -d .venv/lib/python*/site-packages 2>/dev/null | head -n 1)
 
 up:
 	docker compose up --build migrate
 	docker compose up -d --build --remove-orphans postgres redis tg_bot scraper
+
+build-scraper:
+	docker compose build scraper
+
+up-scraper:
+	docker compose up -d --build scraper
 
 down:
 	docker compose down
