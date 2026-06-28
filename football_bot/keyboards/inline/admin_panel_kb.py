@@ -4,7 +4,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 class AdminPanelAction(CallbackData, prefix="adm_panel"):
-    action: str  # edit_club / edit_rating / edit_prev_rating
+    action: str  # edit_club / edit_rating / edit_prev_rating / export_all_players / cancel
 
 
 class AdminClubCallback(CallbackData, prefix="adm_club"):
@@ -13,6 +13,15 @@ class AdminClubCallback(CallbackData, prefix="adm_club"):
 
 class AdminPlayerCallback(CallbackData, prefix="adm_plr"):
     player_id: int
+
+
+def create_admin_cancel_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=AdminPanelAction(action="cancel").pack(),
+    ))
+    return builder.as_markup()
 
 
 def create_admin_panel_kb() -> InlineKeyboardMarkup:
@@ -29,6 +38,10 @@ def create_admin_panel_kb() -> InlineKeyboardMarkup:
         text="📅 Изменить рейтинг за прошлый сезон",
         callback_data=AdminPanelAction(action="edit_prev_rating").pack(),
     ))
+    builder.row(InlineKeyboardButton(
+        text="📄 Выгрузить всех игроков",
+        callback_data=AdminPanelAction(action="export_all_players").pack(),
+    ))
     return builder.as_markup()
 
 
@@ -39,6 +52,10 @@ def create_admin_clubs_kb(clubs: list) -> InlineKeyboardMarkup:
             text=club.name,
             callback_data=AdminClubCallback(club_id=club.id).pack(),
         ))
+    builder.row(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=AdminPanelAction(action="cancel").pack(),
+    ))
     return builder.as_markup()
 
 
@@ -49,4 +66,8 @@ def create_admin_players_kb(players: list) -> InlineKeyboardMarkup:
             text=f"{p.first_name} {p.last_name}",
             callback_data=AdminPlayerCallback(player_id=p.id).pack(),
         ))
+    builder.row(InlineKeyboardButton(
+        text="❌ Отмена",
+        callback_data=AdminPanelAction(action="cancel").pack(),
+    ))
     return builder.as_markup()

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
-from scraper.league_scraper import LeagueScraper
+from scraper.league_scraper import LeagueScraper, _extract_division_name
 from scraper.player_position_overrides import get_fixed_player_position
 from scraper.scraped_data import ScrapedMatchPlayerStat, ScrapedPlayer
 from football_bot.models import (
@@ -91,6 +91,9 @@ def _compute_total_points(sp: ScrapedPlayer) -> float:
     Match-level wins, starts, conceded goals, and defensive points are optional
     because the current scraper only exposes aggregate player stats.
     """
+    if sp.games_played <= 0:
+        return 0
+
     position = _coerce_position(sp.position)
     scoring = _SCORING_BY_POSITION.get(position)
     if scoring is None:
@@ -116,12 +119,19 @@ def _compute_total_points(sp: ScrapedPlayer) -> float:
     return total
 
 
+def _rating_group_key(tournament_name: str) -> str:
+    division_name = _extract_division_name(tournament_name)
+    if division_name:
+        return division_name
+    return tournament_name.strip()
+
+
 def _compute_rankings(players: list[ScrapedPlayer]) -> dict[str, dict]:
     """Compute division_rank, division_total, avg_points_per_game, current_rating
     for every scraped player.  Returns a dict keyed by external_id."""
     by_tourn: dict[str, list[ScrapedPlayer]] = defaultdict(list)
     for sp in players:
-        by_tourn[sp.tournament].append(sp)
+        by_tourn[_rating_group_key(sp.tournament)].append(sp)
 
     stats: dict[str, dict] = {}
     for tourn_players in by_tourn.values():
@@ -129,8 +139,7 @@ def _compute_rankings(players: list[ScrapedPlayer]) -> dict[str, dict]:
         div_total = len(sorted_div)
         for rank, sp in enumerate(sorted_div, start=1):
             total_pts = _compute_total_points(sp)
-            games = max(sp.games_played, 1)
-            avg = round(total_pts / games, 2)
+            avg = round(total_pts / sp.games_played, 2) if sp.games_played > 0 else 0.0
             stats[sp.external_id] = {
                 "current_rating": round(total_pts, 2),
                 "division_rank": rank,
@@ -235,9 +244,12 @@ class SyncService:
             logger.info(f"Saved {len(club_map)} clubs")
 
             now = datetime.now(timezone.utc)
+            all_current_players: list[ScrapedPlayer] = []
+            all_prev_players: list[ScrapedPlayer] = []
             matched = 0
             prev_matched = 0
             saved = 0
+            rated = 0
 
             for tournament_name in sorted(teams_by_tournament):
                 tournament_current_players: list[ScrapedPlayer] = []
@@ -250,6 +262,8 @@ class SyncService:
                     self._apply_fixed_positions(prev_group)
                     tournament_current_players.extend(current_group)
                     tournament_prev_players.extend(prev_group)
+                    all_current_players.extend(current_group)
+                    all_prev_players.extend(prev_group)
                     total_current_players += len(current_group)
                     total_prev_players += len(prev_group)
 
@@ -283,32 +297,37 @@ class SyncService:
                     )
 
                 _apply_match_stat_aggregates(tournament_current_players, match_stats)
-                ranking_map = _compute_rankings(tournament_current_players)
-                prev_ranking_map = _compute_rankings(tournament_prev_players)
-
-                tournament_matched, tournament_prev_matched = await self._sync_registered_players_batch(
-                    session=session,
-                    current_players=tournament_current_players,
-                    prev_players=tournament_prev_players,
-                    ranking_map=ranking_map,
-                    prev_ranking_map=prev_ranking_map,
-                    now=now,
-                )
-                await session.commit()
-
-                matched += tournament_matched
-                prev_matched += tournament_prev_matched
                 logger.info(
                     f"Tournament '{tournament_name}': "
-                    f"{tournament_saved} scraped players saved, "
-                    f"{tournament_matched} current matched, "
-                    f"{tournament_prev_matched} previous matched"
+                    f"{tournament_saved} scraped players saved"
                 )
+
+            ranking_map = _compute_rankings(all_current_players)
+            prev_ranking_map = _compute_rankings(all_prev_players)
+
+            rated = await self._save_scraped_player_ratings_batch(
+                session=session,
+                players=all_current_players,
+                club_map=club_map,
+                ranking_map=ranking_map,
+            )
+            await session.commit()
+
+            matched, prev_matched = await self._sync_registered_players_batch(
+                session=session,
+                current_players=all_current_players,
+                prev_players=all_prev_players,
+                ranking_map=ranking_map,
+                prev_ranking_map=prev_ranking_map,
+                now=now,
+            )
+            await session.commit()
 
             logger.info(
                 f"Sync completed: {len(tournaments)} tournaments, {len(teams)} teams, "
                 f"{total_current_players} current players, {total_prev_players} previous players, "
-                f"{saved} saved, {matched} current matched, {prev_matched} previous matched"
+                f"{saved} saved, {rated} current ratings persisted, "
+                f"{matched} current matched, {prev_matched} previous matched"
             )
 
     @staticmethod
@@ -396,6 +415,27 @@ class SyncService:
         return saved
 
     @classmethod
+    async def _save_scraped_player_ratings_batch(
+        cls,
+        session: AsyncSession,
+        players: list[ScrapedPlayer],
+        club_map: dict[tuple[str, str], int],
+        ranking_map: dict[str, dict],
+    ) -> int:
+        saved = 0
+        for sp in players:
+            club_id = club_map.get((sp.tournament, sp.team))
+            await cls._upsert_scraped_player(
+                session,
+                sp,
+                club_id,
+                computed=ranking_map.get(sp.external_id),
+            )
+            saved += 1
+        await session.flush()
+        return saved
+
+    @classmethod
     async def _save_match_stats_batch(
         cls,
         session: AsyncSession,
@@ -471,38 +511,59 @@ class SyncService:
 
     @staticmethod
     async def _upsert_scraped_player(
-        session: AsyncSession, sp: ScrapedPlayer, club_id: int | None,
+        session: AsyncSession,
+        sp: ScrapedPlayer,
+        club_id: int | None,
+        computed: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
+        values = {
+            "external_id": sp.external_id,
+            "first_name": sp.first_name,
+            "last_name": sp.last_name,
+            "position": _coerce_position(sp.position),
+            "club_id": club_id,
+            "games_played": sp.games_played,
+            "mvp_count": sp.mvp_count,
+            "goals": sp.goals,
+            "assists": sp.assists,
+            "yellow_cards": sp.yellow_cards,
+            "red_cards": sp.red_cards,
+            "updated_at": now,
+        }
+        update_values = {
+            "first_name": sp.first_name,
+            "last_name": sp.last_name,
+            "position": _coerce_position(sp.position),
+            "club_id": club_id,
+            "games_played": sp.games_played,
+            "mvp_count": sp.mvp_count,
+            "goals": sp.goals,
+            "assists": sp.assists,
+            "yellow_cards": sp.yellow_cards,
+            "red_cards": sp.red_cards,
+            "updated_at": now,
+        }
+        if computed is not None:
+            values.update({
+                "current_rating": computed.get("current_rating"),
+                "division_rank": computed.get("division_rank"),
+                "division_total": computed.get("division_total"),
+                "avg_points_per_game": computed.get("avg_points_per_game"),
+            })
+            update_values.update({
+                "current_rating": computed.get("current_rating"),
+                "division_rank": computed.get("division_rank"),
+                "division_total": computed.get("division_total"),
+                "avg_points_per_game": computed.get("avg_points_per_game"),
+            })
+
         stmt = pg_insert(ScrapedPlayerStats).values(
-            external_id=sp.external_id,
-            first_name=sp.first_name,
-            last_name=sp.last_name,
-            position=_coerce_position(sp.position),
-            club_id=club_id,
-            games_played=sp.games_played,
-            mvp_count=sp.mvp_count,
-            goals=sp.goals,
-            assists=sp.assists,
-            yellow_cards=sp.yellow_cards,
-            red_cards=sp.red_cards,
-            updated_at=now,
+            **values,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=[ScrapedPlayerStats.external_id],
-            set_={
-                "first_name": sp.first_name,
-                "last_name": sp.last_name,
-                "position": _coerce_position(sp.position),
-                "club_id": club_id,
-                "games_played": sp.games_played,
-                "mvp_count": sp.mvp_count,
-                "goals": sp.goals,
-                "assists": sp.assists,
-                "yellow_cards": sp.yellow_cards,
-                "red_cards": sp.red_cards,
-                "updated_at": now,
-            },
+            set_=update_values,
         )
         await session.execute(stmt)
 

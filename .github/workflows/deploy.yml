@@ -27,11 +27,14 @@ jobs:
       - name: Install scraper dependencies
         run: pip install -r requirements.scraper.txt
 
-      - name: Run bot tests
-        run: python -m pytest tests/football_bot
+      - name: Run bot unit tests
+        run: python -m pytest tests/football_bot/unit
 
-      - name: Run scraper tests
-        run: python -m pytest tests/scraper
+      - name: Run bot smoke tests
+        run: python -m pytest tests/football_bot/smoke
+
+      - name: Run scraper unit tests
+        run: python -m pytest tests/scraper/unit
 
   deploy:
     runs-on: ubuntu-latest

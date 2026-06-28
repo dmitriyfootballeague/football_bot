@@ -1,6 +1,7 @@
 import asyncio
 from datetime import date, datetime, timezone
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from football_bot.models import (
@@ -228,6 +229,44 @@ def test_compute_total_points_clamps_defensive_points_at_zero():
     assert _compute_total_points(player) == 0
 
 
+@pytest.mark.parametrize(
+    ("position", "goals", "assists", "mvp_count", "wins", "starts", "goals_conceded"),
+    [
+        (PlayerPosition.FORWARD.value, 3, 2, 1, 2, 3, None),
+        (PlayerPosition.DEFENDER.value, 1, 1, 0, 1, 1, 0),
+        (PlayerPosition.GOALKEEPER.value, 0, 2, 1, 2, 2, 0),
+        (None, 2, 3, 1, None, None, None),
+    ],
+)
+def test_compute_total_points_returns_zero_when_player_has_no_games(
+    position,
+    goals,
+    assists,
+    mvp_count,
+    wins,
+    starts,
+    goals_conceded,
+):
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=0,
+        position=position,
+        goals=goals,
+        assists=assists,
+        mvp_count=mvp_count,
+        wins=wins,
+        starts=starts,
+        goals_conceded=goals_conceded,
+        defensive_points=10,
+    )
+
+    assert _compute_total_points(player) == 0
+
+
 def test_apply_match_stat_aggregates_adds_wins_starts_and_defensive_points():
     player = ScrapedPlayer(
         first_name="Ivan",
@@ -235,6 +274,7 @@ def test_apply_match_stat_aggregates_adds_wins_starts_and_defensive_points():
         external_id="p1",
         team="FC Test",
         tournament="Optic",
+        games_played=2,
         position=PlayerPosition.DEFENDER.value,
     )
     match_stats = [
@@ -348,7 +388,7 @@ def test_compute_rankings_groups_by_division_and_computes_ranks():
     }
 
 
-def test_compute_rankings_uses_minimum_one_game_for_average():
+def test_compute_rankings_zero_game_player_gets_zero_rating_and_average():
     players = [
         ScrapedPlayer(
             first_name="Ivan",
@@ -360,12 +400,19 @@ def test_compute_rankings_uses_minimum_one_game_for_average():
             goals=1,
             assists=0,
             mvp_count=0,
+            position=PlayerPosition.DEFENDER.value,
+            defensive_points=8,
         ),
     ]
 
     rankings = _compute_rankings(players)
 
-    assert rankings["p1"]["avg_points_per_game"] == 3.0
+    assert rankings["p1"] == {
+        "current_rating": 0,
+        "division_rank": 1,
+        "division_total": 1,
+        "avg_points_per_game": 0.0,
+    }
 
 
 def test_compute_rankings_falls_back_to_tournament_name_without_division_suffix():
