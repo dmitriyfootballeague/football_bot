@@ -203,4 +203,5 @@ def test_postgres_deployment_files_wire_password_sync():
     assert "COPY scripts/postgres-password-entrypoint.sh" in dockerfile_text
     assert 'ENTRYPOINT ["postgres-password-entrypoint.sh"]' in dockerfile_text
     assert "dockerfile: Dockerfile.postgres" in compose_text
+    assert '127.0.0.1:${POSTGRES_PORT}:5432' in compose_text
     assert "postgres-password-synced" in compose_text
