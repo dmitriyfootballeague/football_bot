@@ -76,6 +76,7 @@ def test_postgres_password_entrypoint_reapplies_password_and_sets_flag(tmp_path)
     stdin_sql = psql_stdin_log.read_text()
     assert "SET password_encryption = 'scram-sha-256';" in stdin_sql
     assert "ALTER ROLE" in stdin_sql
+    assert "WITH LOGIN PASSWORD" in stdin_sql
     assert "role_password" in stdin_sql
 
 
