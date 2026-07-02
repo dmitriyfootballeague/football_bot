@@ -76,4 +76,6 @@ For this repository, the current local branch is not `main`, so update the workf
 - The deploy script uses `git pull --ff-only`, so it will fail instead of overwriting local server changes.
 - Database migrations run through the dedicated `migrate` service before the app containers are started.
 - The server must already have a valid `.env` file before the first deploy.
+- PostgreSQL is bound to `127.0.0.1` on the server, not to the public network. If you need direct access, use `docker compose exec postgres ...` on the server or an SSH tunnel.
+- Use a strong non-default `POSTGRES_PASSWORD` in production. Leaving `postgres/postgres` on an internet-reachable host is not acceptable.
 - The PostgreSQL container reapplies `POSTGRES_PASSWORD` to `POSTGRES_USER` on every start before it reports healthy, so password drift inside an existing DB volume is corrected automatically.
