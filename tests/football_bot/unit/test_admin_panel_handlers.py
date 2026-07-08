@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-from football_bot.models import Club, ScrapedPlayerStats, Tournament
 from football_bot.handlers.admin import admin_panel_handlers
 from football_bot.keyboards.inline.admin_panel_kb import (
     AdminClubCallback,
@@ -245,11 +244,10 @@ def test_admin_cancel_action_clears_state_and_returns_panel(run_async, callback_
 
 
 def test_admin_edit_rating_value_updates_prev_rating(monkeypatch, run_async, message_factory, state_factory, player_factory):
-    player = player_factory(player_id=16)
+    player = player_factory(player_id=16, current_rating=1.0)
+    player.external_id = "ext-16"
 
     class FakePlayerRepo:
-        update_calls = []
-
         def __init__(self, _session):
             pass
 
@@ -257,30 +255,37 @@ def test_admin_edit_rating_value_updates_prev_rating(monkeypatch, run_async, mes
             assert player_id == 16
             return player
 
-        async def update_rating_data(self, player_id, **kwargs):
-            self.update_calls.append((player_id, kwargs))
+    class FakeSeasonRatingRepo:
+        calls = []
+
+        def __init__(self, _session):
+            pass
+
+        async def apply_rating_override(self, player, *, season_bucket, rating, updated_at):
+            self.calls.append((player.id, season_bucket, rating, updated_at))
+            return True
 
     monkeypatch.setattr(admin_panel_handlers, "PlayerRepository", FakePlayerRepo)
+    monkeypatch.setattr(admin_panel_handlers, "SeasonRatingRepository", FakeSeasonRatingRepo)
     message = message_factory(text="10,5")
     state = state_factory({"player_id": 16, "rating_field": "edit_prev_rating"})
 
     run_async(admin_panel_handlers.admin_edit_rating_value(message, state, session=object()))
 
     assert state.cleared is True
-    assert FakePlayerRepo.update_calls[0][0] == 16
-    assert FakePlayerRepo.update_calls[0][1]["prev_season_rating"] == 10.5
-    assert "prev_rating_updated_at" in FakePlayerRepo.update_calls[0][1]
+    assert FakeSeasonRatingRepo.calls[0][0] == 16
+    assert FakeSeasonRatingRepo.calls[0][1] == "previous"
+    assert FakeSeasonRatingRepo.calls[0][2] == 10.5
     assert message.answers == [
         {"text": msg.ADMIN_PREV_RATING_UPDATED.format(name="Ivan Petrov", rating=10.5), "reply_markup": None}
     ]
 
 
 def test_admin_edit_rating_value_updates_current_rating(monkeypatch, run_async, message_factory, state_factory, player_factory):
-    player = player_factory(player_id=17)
+    player = player_factory(player_id=17, current_rating=1.0)
+    player.external_id = "ext-17"
 
     class FakePlayerRepo:
-        update_calls = []
-
         def __init__(self, _session):
             pass
 
@@ -288,53 +293,106 @@ def test_admin_edit_rating_value_updates_current_rating(monkeypatch, run_async, 
             assert player_id == 17
             return player
 
-        async def update_rating_data(self, player_id, **kwargs):
-            self.update_calls.append((player_id, kwargs))
+    class FakeSeasonRatingRepo:
+        calls = []
+
+        def __init__(self, _session):
+            pass
+
+        async def apply_rating_override(self, player, *, season_bucket, rating, updated_at):
+            self.calls.append((player.id, season_bucket, rating, updated_at))
+            return True
 
     monkeypatch.setattr(admin_panel_handlers, "PlayerRepository", FakePlayerRepo)
+    monkeypatch.setattr(admin_panel_handlers, "SeasonRatingRepository", FakeSeasonRatingRepo)
     message = message_factory(text="88.2")
     state = state_factory({"player_id": 17, "rating_field": "edit_rating"})
 
     run_async(admin_panel_handlers.admin_edit_rating_value(message, state, session=object()))
 
-    assert FakePlayerRepo.update_calls[0][0] == 17
-    assert FakePlayerRepo.update_calls[0][1]["current_rating"] == 88.2
-    assert "rating_updated_at" in FakePlayerRepo.update_calls[0][1]
+    assert FakeSeasonRatingRepo.calls[0][0] == 17
+    assert FakeSeasonRatingRepo.calls[0][1] == "current"
+    assert FakeSeasonRatingRepo.calls[0][2] == 88.2
     assert message.answers == [
         {"text": msg.ADMIN_RATING_UPDATED.format(name="Ivan Petrov", rating=88.2), "reply_markup": None}
     ]
 
 
-def test_build_scraped_players_export_includes_rating_columns(run_async):
-    tournament = Tournament(id=3, name="Суперлига — Премьер-Лига")
-    club = Club(id=5, name="Юнитек", tournament_id=3)
-    club.tournament = tournament
-    player = ScrapedPlayerStats(
-        id=7,
-        external_id="ext-7",
-        first_name="Ivan",
-        last_name="Petrov",
-        club_id=5,
-        games_played=12,
-        mvp_count=2,
-        goals=4,
-        assists=5,
-        yellow_cards=1,
-        red_cards=0,
-        current_rating=24.5,
-        division_rank=8,
-        division_total=30,
-        avg_points_per_game=2.04,
-    )
-    player.club = club
-    player.created_at = datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc)
-    player.updated_at = datetime(2026, 6, 28, 11, 0, tzinfo=timezone.utc)
+def test_admin_edit_rating_value_reports_missing_season_data(monkeypatch, run_async, message_factory, state_factory, player_factory):
+    player = player_factory(player_id=18)
+    player.external_id = None
 
-    class FakeScalarResult:
+    class FakePlayerRepo:
+        def __init__(self, _session):
+            pass
+
+        async def get_by_id(self, player_id):
+            assert player_id == 18
+            return player
+
+    class FakeSeasonRatingRepo:
+        def __init__(self, _session):
+            pass
+
+        async def apply_rating_override(self, player, *, season_bucket, rating, updated_at):
+            return False
+
+    monkeypatch.setattr(admin_panel_handlers, "PlayerRepository", FakePlayerRepo)
+    monkeypatch.setattr(admin_panel_handlers, "SeasonRatingRepository", FakeSeasonRatingRepo)
+    message = message_factory(text="7.5")
+    state = state_factory({"player_id": 18, "rating_field": "edit_rating"})
+
+    run_async(admin_panel_handlers.admin_edit_rating_value(message, state, session=object()))
+
+    assert message.answers == [
+        {
+            "text": msg.ADMIN_RATING_SEASON_UNAVAILABLE.format(name="Ivan Petrov"),
+            "reply_markup": None,
+        }
+    ]
+
+
+def test_build_scraped_players_export_includes_rating_columns(run_async):
+    row = {
+        "id": 7,
+        "external_id": "ext-7",
+        "season_key": "2025/2026",
+        "season_label": "Суперлига 2025/2026",
+        "season_bucket": "current",
+        "first_name": "Ivan",
+        "last_name": "Petrov",
+        "position": "defender",
+        "club_id": 5,
+        "club_name": "Юнитек",
+        "tournament_name": "Суперлига — Премьер-Лига",
+        "division_key": "Премьер-Лига",
+        "games_played": 12,
+        "mvp_count": 2,
+        "goals": 4,
+        "assists": 5,
+        "yellow_cards": 1,
+        "red_cards": 0,
+        "scraped_rating": 23.0,
+        "rating_override": 24.5,
+        "rating_override_updated_at": datetime(2026, 6, 28, 10, 0, tzinfo=timezone.utc),
+        "wins": 8,
+        "starts": 9,
+        "goals_conceded": 10,
+        "defensive_points": 12,
+        "computed_rating": 21.4,
+        "current_rating": 24.5,
+        "division_rank": 8,
+        "division_total": 30,
+        "position_rank": 2,
+        "position_total": 10,
+        "avg_points_per_game": 2.04,
+    }
+
+    class FakeMappingResult:
         def __init__(self, rows):
             self._rows = rows
 
-        def scalars(self):
+        def mappings(self):
             return self
 
         def all(self):
@@ -342,17 +400,19 @@ def test_build_scraped_players_export_includes_rating_columns(run_async):
 
     class FakeSession:
         async def execute(self, _stmt):
-            return FakeScalarResult([player])
+            return FakeMappingResult([row])
 
     filename, payload, row_count = run_async(
         admin_panel_handlers._build_scraped_players_export(FakeSession())
     )
 
     text = payload.decode("utf-8-sig")
-    assert filename.startswith("scraped_players_stats_")
+    assert filename.startswith("computed_player_ratings_")
     assert row_count == 1
-    assert "current_rating,division_rank,division_total,avg_points_per_game" in text
-    assert "24.5,8,30,2.04" in text
+    assert "season_key,season_label,season_bucket" in text
+    assert "computed_rating,current_rating,division_rank,division_total,position_rank,position_total,avg_points_per_game" in text
+    assert "2025/2026,Суперлига 2025/2026,current" in text
+    assert "21.4,24.5,8,30,2,10,2.04" in text
     assert "Юнитек" in text
     assert "Суперлига — Премьер-Лига" in text
 

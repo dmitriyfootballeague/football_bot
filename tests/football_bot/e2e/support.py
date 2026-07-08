@@ -51,7 +51,7 @@ from football_bot.models import (
     PlayerPosition,
     PlayerRole,
     RegistrationStatus,
-    ScrapedPlayerStats,
+    ScrapedPlayerSeasonStats,
     Tournament,
     TransferRequest,
     TransferStatus,
@@ -496,7 +496,8 @@ def real_e2e_app(real_e2e_app_runtime, real_e2e_session_pool):
         async with real_e2e_session_pool() as session:
             await session.execute(
                 text(
-                    "TRUNCATE TABLE scraped_player_stats, transfer_requests, players, clubs, tournaments "
+                    "TRUNCATE TABLE scraped_player_season_stats, match_stats, scraped_player_stats, "
+                    "transfer_requests, players, clubs, tournaments "
                     "RESTART IDENTITY CASCADE"
                 )
             )
@@ -527,6 +528,7 @@ async def _seed_player(
     username: str,
     role: PlayerRole,
     registration_status: RegistrationStatus,
+    external_id: str | None = None,
     club_id: int | None = None,
     position: PlayerPosition = PlayerPosition.FORWARD,
     current_rating: float | None = None,
@@ -549,6 +551,7 @@ async def _seed_player(
         player = Player(
             telegram_id=telegram_id,
             telegram_username=username,
+            external_id=external_id,
             first_name=first_name,
             last_name=last_name,
             position=position,
@@ -597,24 +600,38 @@ async def _seed_scraped_player(
     division_rank: int | None = None,
     division_total: int | None = None,
     avg_points_per_game: float | None = None,
-) -> ScrapedPlayerStats:
+) -> ScrapedPlayerSeasonStats:
     async with session_pool() as session:
-        player = ScrapedPlayerStats(
+        tournament_name = None
+        if club_id is not None:
+            result = await session.execute(
+                select(Tournament.name)
+                .select_from(Club)
+                .join(Tournament, Tournament.id == Club.tournament_id)
+                .where(Club.id == club_id)
+            )
+            tournament_name = result.scalar_one_or_none()
+
+        player = ScrapedPlayerSeasonStats(
             external_id=external_id,
+            season_key="2025/2026",
+            season_label="2025/2026",
+            season_bucket="current",
+            tournament_name=tournament_name or "2025/2026",
             first_name=first_name,
             last_name=last_name,
             club_id=club_id,
-            position=position,
+            position=position.value if position else None,
             games_played=games_played,
             mvp_count=mvp_count,
             goals=goals,
             assists=assists,
             yellow_cards=yellow_cards,
             red_cards=red_cards,
-            current_rating=current_rating,
-            division_rank=division_rank,
-            division_total=division_total,
-            avg_points_per_game=avg_points_per_game,
+            rating_override=current_rating,
+            rating_override_updated_at=(
+                datetime.now(timezone.utc) if current_rating is not None else None
+            ),
         )
         session.add(player)
         await session.commit()

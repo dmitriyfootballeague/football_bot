@@ -50,6 +50,7 @@ class FakeOp:
     def __init__(self, bind):
         self.bind = bind
         self.added_columns: list[tuple[str, str]] = []
+        self.dropped_columns: list[tuple[str, str]] = []
         self.created_tables: list[str] = []
         self.created_indexes: list[tuple[str, str, tuple[str, ...], bool]] = []
         self.renamed_tables: list[tuple[str, str]] = []
@@ -64,6 +65,9 @@ class FakeOp:
 
     def add_column(self, table_name, column):
         self.added_columns.append((table_name, column.name))
+
+    def drop_column(self, table_name, column_name):
+        self.dropped_columns.append((table_name, column_name))
 
     def create_table(self, table_name, *args, **kwargs):
         self.created_tables.append(table_name)
@@ -246,3 +250,104 @@ def test_migration_010_upgrade_skips_existing_rating_columns(monkeypatch):
     module.upgrade()
 
     assert fake_op.added_columns == []
+
+
+def test_migration_011_upgrade_skips_existing_schema_bits(monkeypatch):
+    module = _load_migration("011_player_season_ratings_view.py")
+    bind = FakeBind()
+    fake_op = FakeOp(bind)
+    inspector = FakeInspector(
+        tables=["scraped_player_season_stats", "match_stats"],
+        columns={
+            "match_stats": [
+                {"name": "id"},
+                {"name": "season_key"},
+                {"name": "season_label"},
+            ],
+        },
+        indexes={
+            "scraped_player_season_stats": [
+                {"name": "ix_scraped_player_season_stats_external_id"},
+                {"name": "ix_scraped_player_season_stats_season_key"},
+                {"name": "ix_scraped_player_season_stats_season_label"},
+                {"name": "ix_scraped_player_season_stats_club_id"},
+            ],
+            "match_stats": [
+                {"name": "ix_match_stats_player_external_id_season_label"},
+            ],
+        },
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+    monkeypatch.setattr(module.sa, "inspect", lambda _bind: inspector)
+
+    module.upgrade()
+
+    assert fake_op.created_tables == []
+    assert fake_op.added_columns == []
+    assert fake_op.created_indexes == []
+    assert fake_op.executed_sql
+    assert any("in_roster" in sql for sql in fake_op.executed_sql)
+
+
+def test_migration_012_upgrade_skips_existing_override_columns(monkeypatch):
+    module = _load_migration("012_rating_overrides_on_season_stats.py")
+    bind = FakeBind()
+    fake_op = FakeOp(bind)
+    inspector = FakeInspector(
+        tables=["scraped_player_season_stats"],
+        columns={
+            "scraped_player_season_stats": [
+                {"name": "id"},
+                {"name": "rating_override"},
+                {"name": "rating_override_updated_at"},
+            ]
+        },
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+    monkeypatch.setattr(module.sa, "inspect", lambda _bind: inspector)
+
+    module.upgrade()
+
+    assert fake_op.added_columns == []
+    assert fake_op.executed_sql
+    assert any("in_roster" in sql for sql in fake_op.executed_sql)
+
+
+def test_migration_013_upgrade_refreshes_view_with_roster_filter(monkeypatch):
+    module = _load_migration("013_fix_roster_aware_defensive_points_view.py")
+    bind = FakeBind()
+    fake_op = FakeOp(bind)
+    monkeypatch.setattr(module, "op", fake_op)
+
+    module.upgrade()
+
+    assert fake_op.executed_sql
+    assert any("in_roster" in sql for sql in fake_op.executed_sql)
+
+
+def test_migration_014_upgrade_drops_scraped_snapshot_rating_columns(monkeypatch):
+    module = _load_migration("014_drop_scraped_player_rating_columns.py")
+    bind = FakeBind()
+    fake_op = FakeOp(bind)
+    inspector = FakeInspector(
+        columns={
+            "scraped_player_stats": [
+                {"name": "id"},
+                {"name": "current_rating"},
+                {"name": "division_rank"},
+                {"name": "division_total"},
+                {"name": "avg_points_per_game"},
+            ]
+        },
+    )
+    monkeypatch.setattr(module, "op", fake_op)
+    monkeypatch.setattr(module.sa, "inspect", lambda _bind: inspector)
+
+    module.upgrade()
+
+    assert fake_op.dropped_columns == [
+        ("scraped_player_stats", "current_rating"),
+        ("scraped_player_stats", "division_rank"),
+        ("scraped_player_stats", "division_total"),
+        ("scraped_player_stats", "avg_points_per_game"),
+    ]

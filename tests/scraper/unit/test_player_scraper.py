@@ -118,7 +118,15 @@ def test_parse_player_row_returns_scraped_player():
         }
     )
 
-    player = asyncio.run(_parse_player_row(row, "FC Test", "Optic"))
+    player = asyncio.run(
+        _parse_player_row(
+            row,
+            "FC Test",
+            "Optic",
+            season_bucket="current",
+            season_label="Высший (Лига 8x8, 2025/2026)",
+        )
+    )
 
     assert player is not None
     assert player.first_name == "Ivan"
@@ -126,6 +134,9 @@ def test_parse_player_row_returns_scraped_player():
     assert player.external_id == "ext-123"
     assert player.team == "FC Test"
     assert player.tournament == "Optic"
+    assert player.season_bucket == "current"
+    assert player.season_label == "Высший (Лига 8x8, 2025/2026)"
+    assert player.season_key == "2025/2026"
     assert player.games_played == 10
     assert player.mvp_count == 2
     assert player.goals == 3
@@ -171,7 +182,7 @@ def test_select_division_prefers_matching_group():
 
     selected = asyncio.run(_select_division(page, "previous"))
 
-    assert selected is True
+    assert selected == "Season 2024"
     assert previous_item.clicked is True
     assert current_item.clicked is False
 
@@ -189,7 +200,7 @@ def test_select_division_uses_fallback_index_when_no_groups():
 
     selected = asyncio.run(_select_division(page, "previous"))
 
-    assert selected is True
+    assert selected == "Season 2024"
     assert second_item.clicked is True
     assert first_item.clicked is False
 
@@ -199,7 +210,7 @@ def test_select_division_returns_when_dropdown_missing():
 
     selected = asyncio.run(_select_division(page, "current"))
 
-    assert selected is False
+    assert selected is None
     assert page.waits == []
 
 
@@ -229,7 +240,7 @@ def test_select_division_prefers_exact_configured_tournament():
         )
     )
 
-    assert selected is True
+    assert selected == "Высший (Лига 8х8, 2025/26)"
     assert target.clicked is True
     assert unrelated.clicked is False
 
@@ -253,6 +264,6 @@ def test_select_division_returns_false_when_exact_configured_tournament_missing(
         )
     )
 
-    assert selected is False
+    assert selected is None
     assert first_item.clicked is False
     assert second_item.clicked is False

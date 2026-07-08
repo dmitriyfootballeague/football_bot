@@ -6,9 +6,8 @@ from aiogram import Router, F
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from football_bot.filters.is_admin import IsAnyAdminFilter
 from football_bot.keyboards.inline.admin_panel_kb import (
@@ -17,8 +16,8 @@ from football_bot.keyboards.inline.admin_panel_kb import (
     create_admin_clubs_kb, create_admin_players_kb,
 )
 from football_bot.locales import messages as msg
-from football_bot.models import Club, ScrapedPlayerStats
-from football_bot.repository import ClubRepository, PlayerRepository
+from football_bot.models import Club
+from football_bot.repository import ClubRepository, PlayerRepository, SeasonRatingRepository
 from football_bot.states import FSMAdminEditClub, FSMAdminEditRating
 
 
@@ -33,70 +32,144 @@ ADMIN_EDIT_STATES = (
     FSMAdminEditRating.enter_rating,
 )
 
+_computed_ratings_view = table(
+    "computed_scraped_player_ratings",
+    column("id"),
+    column("external_id"),
+    column("season_key"),
+    column("season_label"),
+    column("season_bucket"),
+    column("tournament_name"),
+    column("division_key"),
+    column("first_name"),
+    column("last_name"),
+    column("position"),
+    column("club_id"),
+    column("games_played"),
+    column("mvp_count"),
+    column("goals"),
+    column("assists"),
+    column("yellow_cards"),
+    column("red_cards"),
+    column("scraped_rating"),
+    column("rating_override"),
+    column("rating_override_updated_at"),
+    column("wins"),
+    column("starts"),
+    column("goals_conceded"),
+    column("defensive_points"),
+    column("computed_rating"),
+    column("current_rating"),
+    column("division_rank"),
+    column("division_total"),
+    column("position_rank"),
+    column("position_total"),
+    column("avg_points_per_game"),
+)
+
+
+def _csv_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
 
 async def _build_scraped_players_export(session: AsyncSession) -> tuple[str, bytes, int]:
     stmt = (
-        select(ScrapedPlayerStats)
-        .options(
-            selectinload(ScrapedPlayerStats.club).selectinload(Club.tournament)
+        select(
+            _computed_ratings_view,
+            Club.name.label("club_name"),
         )
-        .order_by(ScrapedPlayerStats.id)
+        .select_from(
+            _computed_ratings_view.outerjoin(Club, Club.id == _computed_ratings_view.c.club_id)
+        )
+        .order_by(
+            _computed_ratings_view.c.season_key.desc(),
+            _computed_ratings_view.c.season_bucket,
+            _computed_ratings_view.c.division_key,
+            _computed_ratings_view.c.division_rank,
+            _computed_ratings_view.c.external_id,
+        )
     )
     result = await session.execute(stmt)
-    scraped_players = list(result.scalars().all())
+    rating_rows = list(result.mappings().all())
 
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
         "id",
         "external_id",
+        "season_key",
+        "season_label",
+        "season_bucket",
         "first_name",
         "last_name",
         "position",
         "club_id",
         "club_name",
         "tournament_name",
+        "division_key",
         "games_played",
         "mvp_count",
         "goals",
         "assists",
         "yellow_cards",
         "red_cards",
+        "scraped_rating",
+        "rating_override",
+        "rating_override_updated_at",
+        "wins",
+        "starts",
+        "goals_conceded",
+        "defensive_points",
+        "computed_rating",
         "current_rating",
         "division_rank",
         "division_total",
+        "position_rank",
+        "position_total",
         "avg_points_per_game",
-        "created_at",
-        "updated_at",
     ])
-    for player in scraped_players:
-        club = player.club
-        tournament = club.tournament if club else None
+    for row in rating_rows:
         writer.writerow([
-            player.id,
-            player.external_id,
-            player.first_name,
-            player.last_name,
-            player.position.value if player.position else "",
-            player.club_id or "",
-            club.name if club else "",
-            tournament.name if tournament else "",
-            player.games_played,
-            player.mvp_count,
-            player.goals,
-            player.assists,
-            player.yellow_cards,
-            player.red_cards,
-            player.current_rating if player.current_rating is not None else "",
-            player.division_rank if player.division_rank is not None else "",
-            player.division_total if player.division_total is not None else "",
-            player.avg_points_per_game if player.avg_points_per_game is not None else "",
-            player.created_at.isoformat() if player.created_at else "",
-            player.updated_at.isoformat() if player.updated_at else "",
+            _csv_value(row["id"]),
+            _csv_value(row["external_id"]),
+            _csv_value(row["season_key"]),
+            _csv_value(row["season_label"]),
+            _csv_value(row["season_bucket"]),
+            _csv_value(row["first_name"]),
+            _csv_value(row["last_name"]),
+            _csv_value(row["position"]),
+            _csv_value(row["club_id"]),
+            _csv_value(row["club_name"]),
+            _csv_value(row["tournament_name"]),
+            _csv_value(row["division_key"]),
+            _csv_value(row["games_played"]),
+            _csv_value(row["mvp_count"]),
+            _csv_value(row["goals"]),
+            _csv_value(row["assists"]),
+            _csv_value(row["yellow_cards"]),
+            _csv_value(row["red_cards"]),
+            _csv_value(row["scraped_rating"]),
+            _csv_value(row["rating_override"]),
+            _csv_value(row["rating_override_updated_at"]),
+            _csv_value(row["wins"]),
+            _csv_value(row["starts"]),
+            _csv_value(row["goals_conceded"]),
+            _csv_value(row["defensive_points"]),
+            _csv_value(row["computed_rating"]),
+            _csv_value(row["current_rating"]),
+            _csv_value(row["division_rank"]),
+            _csv_value(row["division_total"]),
+            _csv_value(row["position_rank"]),
+            _csv_value(row["position_total"]),
+            _csv_value(row["avg_points_per_game"]),
         ])
 
-    filename = f"scraped_players_stats_{datetime.now(timezone.utc).date().isoformat()}.csv"
-    return filename, output.getvalue().encode("utf-8-sig"), len(scraped_players)
+    filename = f"computed_player_ratings_{datetime.now(timezone.utc).date().isoformat()}.csv"
+    return filename, output.getvalue().encode("utf-8-sig"), len(rating_rows)
 
 
 @router.message(Command("admin"))
@@ -259,19 +332,28 @@ async def admin_edit_rating_value(message: Message, state: FSMContext, session: 
 
     name = f"{player.first_name} {player.last_name}"
     now = datetime.now(timezone.utc)
+    rating_repo = SeasonRatingRepository(session)
 
     if rating_field == "edit_prev_rating":
-        await repo.update_rating_data(
-            player_id,
-            prev_season_rating=new_rating,
-            prev_rating_updated_at=now,
+        updated = await rating_repo.apply_rating_override(
+            player,
+            season_bucket="previous",
+            rating=new_rating,
+            updated_at=now,
         )
+        if not updated:
+            await message.answer(msg.ADMIN_RATING_SEASON_UNAVAILABLE.format(name=name))
+            return
         await message.answer(msg.ADMIN_PREV_RATING_UPDATED.format(name=name, rating=new_rating))
         return
 
-    await repo.update_rating_data(
-        player_id,
-        current_rating=new_rating,
-        rating_updated_at=now,
+    updated = await rating_repo.apply_rating_override(
+        player,
+        season_bucket="current",
+        rating=new_rating,
+        updated_at=now,
     )
+    if not updated:
+        await message.answer(msg.ADMIN_RATING_SEASON_UNAVAILABLE.format(name=name))
+        return
     await message.answer(msg.ADMIN_RATING_UPDATED.format(name=name, rating=new_rating))

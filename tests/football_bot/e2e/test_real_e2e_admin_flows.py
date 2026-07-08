@@ -81,6 +81,7 @@ def test_real_e2e_admin_panel_edit_flows(run_async, real_e2e_app, real_e2e_sessi
             first_name="Maksim",
             last_name="Rated",
             username="maksim_rated",
+            external_id="maksim-rated-ext",
             role=PlayerRole.PLAYER,
             registration_status=RegistrationStatus.APPROVED,
             club_id=club.id,

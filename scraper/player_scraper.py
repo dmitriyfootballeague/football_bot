@@ -25,6 +25,7 @@ DROPDOWN_SELECTORS = [
 
 CURRENT_GROUP_LABELS = {"текущие", "текущий", "current"}
 PREVIOUS_GROUP_LABELS = {"прошедшие", "предыдущие", "архив", "previous"}
+SEASON_KEY_PATTERN = re.compile(r"(20\d{2})\s*/\s*(\d{2,4})")
 
 
 async def scrape_team_players(
@@ -44,12 +45,12 @@ async def scrape_team_players(
         await page.goto(club_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        selected = await _select_division(
+        selected_label = await _select_division(
             page,
             season_bucket,
             target_tournament=target_tournament,
         )
-        if target_tournament and not selected:
+        if target_tournament and not selected_label:
             logger.warning(
                 f"  {team_name}: target tournament '{target_tournament}' was not found in dropdown"
             )
@@ -69,7 +70,13 @@ async def scrape_team_players(
 
         if not rows:
             # Last-resort JS extraction
-            players = await _js_extract_players(page, team_name, tournament)
+            players = await _js_extract_players(
+                page,
+                team_name,
+                tournament,
+                season_bucket=season_bucket,
+                season_label=selected_label,
+            )
             logger.info(f"  {team_name}: JS fallback extracted {len(players)} players")
             return players
 
@@ -77,7 +84,13 @@ async def scrape_team_players(
         await page.wait_for_timeout(3000)
 
         for row in rows:
-            player = await _parse_player_row(row, team_name, tournament)
+            player = await _parse_player_row(
+                row,
+                team_name,
+                tournament,
+                season_bucket=season_bucket,
+                season_label=selected_label,
+            )
             if player:
                 players.append(player)
 
@@ -107,7 +120,7 @@ async def _select_division(
     page: Page,
     season_bucket: str,
     target_tournament: str | None = None,
-) -> bool:
+) -> str | None:
     """Select current/previous season or an exact configured tournament in the dropdown."""
     dropdown = None
     for sel in DROPDOWN_SELECTORS:
@@ -117,7 +130,7 @@ async def _select_division(
 
     if not dropdown:
         logger.debug("  Division dropdown not found, using default")
-        return False
+        return None
 
     await dropdown.click()
     await page.wait_for_timeout(1000)
@@ -136,11 +149,11 @@ async def _select_division(
                 await item.click()
                 await page.wait_for_timeout(5000)
                 logger.info(f"  Selected exact tournament: '{text}'")
-                return True
+                return text
         logger.warning(
             f"  Exact tournament '{target_tournament}' not found in dropdown options"
         )
-        return False
+        return None
 
     target_groups = (
         CURRENT_GROUP_LABELS if season_bucket == "current" else PREVIOUS_GROUP_LABELS
@@ -171,7 +184,7 @@ async def _select_division(
             await item.click()
             await page.wait_for_timeout(5000)
             logger.info(f"  Selected {season_bucket} division: '{text}'")
-            return True
+            return text
 
     if fallback_values:
         fallback_idx = 0 if season_bucket == "current" else min(1, len(fallback_values) - 1)
@@ -179,13 +192,36 @@ async def _select_division(
         await item.click()
         await page.wait_for_timeout(5000)
         logger.info(f"  Selected fallback {season_bucket} division: '{text}'")
-        return True
+        return text
 
     logger.warning(f"  No {season_bucket} division found in dropdown")
-    return False
+    return None
 
 
-async def _parse_player_row(row, team_name: str, tournament: str) -> ScrapedPlayer | None:
+def _extract_season_key(label: str | None, season_bucket: str) -> str:
+    if not label:
+        return season_bucket
+
+    normalized = _normalize_tournament_label(label)
+    match = SEASON_KEY_PATTERN.search(normalized)
+    if not match:
+        return label.strip()
+
+    start_year = match.group(1)
+    end_year = match.group(2)
+    if len(end_year) == 2:
+        end_year = f"{start_year[:2]}{end_year}"
+    return f"{start_year}/{end_year}"
+
+
+async def _parse_player_row(
+    row,
+    team_name: str,
+    tournament: str,
+    *,
+    season_bucket: str = "current",
+    season_label: str | None = None,
+) -> ScrapedPlayer | None:
     """Parse a single player row from the rankings table."""
     player_link = (
         await row.query_selector("a.player")
@@ -235,6 +271,9 @@ async def _parse_player_row(row, team_name: str, tournament: str) -> ScrapedPlay
         external_id=external_id,
         team=team_name,
         tournament=tournament,
+        season_bucket=season_bucket,
+        season_label=season_label or tournament,
+        season_key=_extract_season_key(season_label or tournament, season_bucket),
         games_played=games,
         mvp_count=mvp,
         goals=goals,
@@ -276,7 +315,12 @@ async def _extract_stats(row) -> list[int]:
 
 
 async def _js_extract_players(
-    page: Page, team_name: str, tournament: str,
+    page: Page,
+    team_name: str,
+    tournament: str,
+    *,
+    season_bucket: str = "current",
+    season_label: str | None = None,
 ) -> list[ScrapedPlayer]:
     """JS-based extraction as a last resort when CSS selectors fail."""
     try:
@@ -320,6 +364,9 @@ async def _js_extract_players(
                 external_id=ext_id,
                 team=team_name,
                 tournament=tournament,
+                season_bucket=season_bucket,
+                season_label=season_label or tournament,
+                season_key=_extract_season_key(season_label or tournament, season_bucket),
                 games_played=stats[0] if len(stats) > 0 else 0,
                 mvp_count=stats[1] if len(stats) > 1 else 0,
                 goals=stats[2] if len(stats) > 2 else 0,
