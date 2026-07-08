@@ -63,14 +63,15 @@ def test_scrape_tournament_match_stats_flattens_match_rows(monkeypatch):
     ]
 
 
-def test_scrape_tournament_match_stats_discards_partial_rows_on_error(monkeypatch):
+def test_scrape_tournament_match_stats_keeps_successful_rows_on_error(monkeypatch):
     async def fake_scrape_tournament_match_urls(_pw, _tournament_url):
         return [
             "https://olesports.ru/match/m1",
             "https://olesports.ru/match/m2",
         ]
 
-    async def fake_scrape_match_player_stats(_pw, match_url, _tournament_name):
+    async def fake_scrape_match_player_stats(_pw, match_url, tournament_name):
+        assert tournament_name == "League"
         if match_url.endswith("/m2"):
             raise RuntimeError("boom")
         return [_make_stat("m1", "m1-p1")]
@@ -88,17 +89,18 @@ def test_scrape_tournament_match_stats_discards_partial_rows_on_error(monkeypatc
 
     stats = asyncio.run(scrape_tournament_match_stats(object(), tournament))
 
-    assert stats == []
+    assert [stat.match_external_id for stat in stats] == ["m1"]
 
 
-def test_scrape_tournament_match_stats_discards_partial_rows_on_empty_match(monkeypatch):
+def test_scrape_tournament_match_stats_keeps_successful_rows_on_empty_match(monkeypatch):
     async def fake_scrape_tournament_match_urls(_pw, _tournament_url):
         return [
             "https://olesports.ru/match/m1",
             "https://olesports.ru/match/m2",
         ]
 
-    async def fake_scrape_match_player_stats(_pw, match_url, _tournament_name):
+    async def fake_scrape_match_player_stats(_pw, match_url, tournament_name):
+        assert tournament_name == "League"
         if match_url.endswith("/m2"):
             return []
         return [_make_stat("m1", "m1-p1")]
@@ -116,4 +118,4 @@ def test_scrape_tournament_match_stats_discards_partial_rows_on_empty_match(monk
 
     stats = asyncio.run(scrape_tournament_match_stats(object(), tournament))
 
-    assert stats == []
+    assert [stat.match_external_id for stat in stats] == ["m1"]

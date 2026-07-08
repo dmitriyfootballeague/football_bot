@@ -29,7 +29,7 @@ async def scrape_tournament_match_stats(
 ) -> list[ScrapedMatchPlayerStat]:
     match_urls = await scrape_tournament_match_urls(pw, tournament.url)
     stats: list[ScrapedMatchPlayerStat] = []
-    had_incomplete_match = False
+    incomplete_matches = 0
 
     for match_url in match_urls:
         try:
@@ -39,23 +39,22 @@ async def scrape_tournament_match_stats(
                 tournament_name=tournament.name,
             )
             if not match_rows:
-                had_incomplete_match = True
+                incomplete_matches += 1
                 logger.warning(
                     f"  Match '{match_url}' produced no roster rows; "
-                    "discarding match-based stats for this tournament"
+                    "skipping only this match"
                 )
                 continue
             stats.extend(match_rows)
         except Exception as exc:
-            had_incomplete_match = True
+            incomplete_matches += 1
             logger.error(f"  Failed to scrape match '{match_url}': {exc}")
 
-    if had_incomplete_match:
+    if incomplete_matches:
         logger.warning(
-            f"  Tournament '{tournament.name}': incomplete match scrape detected; "
-            "skipping match-based stat persistence for this sync"
+            f"  Tournament '{tournament.name}': skipped {incomplete_matches} incomplete "
+            f"matches and kept {len(stats)} scraped player rows"
         )
-        return []
 
     logger.info(
         f"  Tournament '{tournament.name}': scraped {len(stats)} match player rows "

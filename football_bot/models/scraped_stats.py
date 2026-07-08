@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Enum, Float, Integer, String, ForeignKey
+from sqlalchemy import Enum, Integer, String, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .player import PlayerPosition
@@ -32,11 +32,5 @@ class ScrapedPlayerStats(TimestampMixin, Base):
     assists: Mapped[int] = mapped_column(Integer, default=0)
     yellow_cards: Mapped[int] = mapped_column(Integer, default=0)
     red_cards: Mapped[int] = mapped_column(Integer, default=0)
-
-    # Computed current-season rating fields
-    current_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
-    division_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    division_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    avg_points_per_game: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     club: Mapped["Club | None"] = relationship(foreign_keys=[club_id])

@@ -565,6 +565,7 @@ def test_smoke_admin_panel_club_and_rating_flows(
 ):
     club = _club_stub(91, "Старое имя")
     player = player_factory(player_id=401, first_name="Roman", last_name="Romanov")
+    player.external_id = "ext-401"
 
     class FakeClubRepo:
         updates = []
@@ -583,8 +584,6 @@ def test_smoke_admin_panel_club_and_rating_flows(
             self.updates.append((club_id, new_name))
 
     class FakePlayerRepo:
-        update_calls = []
-
         def __init__(self, _session):
             pass
 
@@ -595,11 +594,19 @@ def test_smoke_admin_panel_club_and_rating_flows(
             assert player_id == 401
             return player
 
-        async def update_rating_data(self, player_id, **kwargs):
-            self.update_calls.append((player_id, kwargs))
+    class FakeSeasonRatingRepo:
+        calls = []
+
+        def __init__(self, _session):
+            pass
+
+        async def apply_rating_override(self, player, *, season_bucket, rating, updated_at):
+            self.calls.append((player.id, season_bucket, rating, updated_at))
+            return True
 
     monkeypatch.setattr(admin_panel_handlers, "ClubRepository", FakeClubRepo)
     monkeypatch.setattr(admin_panel_handlers, "PlayerRepository", FakePlayerRepo)
+    monkeypatch.setattr(admin_panel_handlers, "SeasonRatingRepository", FakeSeasonRatingRepo)
 
     panel_message = message_factory(text="/admin", user_id=9001)
     run_async(admin_panel_handlers.admin_panel(panel_message))
@@ -686,10 +693,12 @@ def test_smoke_admin_panel_club_and_rating_flows(
         )
     )
 
-    assert FakePlayerRepo.update_calls[0][0] == 401
-    assert FakePlayerRepo.update_calls[0][1]["current_rating"] == 88.4
-    assert FakePlayerRepo.update_calls[1][0] == 401
-    assert FakePlayerRepo.update_calls[1][1]["prev_season_rating"] == 77.7
+    assert FakeSeasonRatingRepo.calls[0][0] == 401
+    assert FakeSeasonRatingRepo.calls[0][1] == "current"
+    assert FakeSeasonRatingRepo.calls[0][2] == 88.4
+    assert FakeSeasonRatingRepo.calls[1][0] == 401
+    assert FakeSeasonRatingRepo.calls[1][1] == "previous"
+    assert FakeSeasonRatingRepo.calls[1][2] == 77.7
 
     async def fake_build(_session):
         return "players.csv", b"id,current_rating\n1,10\n", 1

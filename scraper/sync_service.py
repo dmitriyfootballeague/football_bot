@@ -1,9 +1,10 @@
 import asyncio
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import column, select, table
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 
@@ -17,6 +18,7 @@ from football_bot.models import (
     PlayerPosition,
     RegistrationStatus,
     ScrapedPlayerStats,
+    ScrapedPlayerSeasonStats,
     Tournament,
 )
 from scraper.logging import logger
@@ -73,6 +75,40 @@ _SCORING_BY_POSITION = {
     ),
 }
 
+_SEASON_KEY_PATTERN = re.compile(r"(20\d{2})\s*/\s*(\d{2,4})")
+
+_computed_ratings_view = table(
+    "computed_scraped_player_ratings",
+    column("id"),
+    column("external_id"),
+    column("season_key"),
+    column("season_label"),
+    column("season_bucket"),
+    column("tournament_name"),
+    column("division_key"),
+    column("first_name"),
+    column("last_name"),
+    column("position"),
+    column("club_id"),
+    column("games_played"),
+    column("mvp_count"),
+    column("goals"),
+    column("assists"),
+    column("yellow_cards"),
+    column("red_cards"),
+    column("scraped_rating"),
+    column("wins"),
+    column("starts"),
+    column("goals_conceded"),
+    column("defensive_points"),
+    column("current_rating"),
+    column("division_rank"),
+    column("division_total"),
+    column("position_rank"),
+    column("position_total"),
+    column("avg_points_per_game"),
+)
+
 
 def _coerce_position(position: PlayerPosition | str | None) -> PlayerPosition | None:
     if isinstance(position, PlayerPosition):
@@ -88,8 +124,8 @@ def _coerce_position(position: PlayerPosition | str | None) -> PlayerPosition | 
 def _compute_total_points(sp: ScrapedPlayer) -> float:
     """Compute Scout points from fixed position and available stats.
 
-    Match-level wins, starts, conceded goals, and defensive points are optional
-    because the current scraper only exposes aggregate player stats.
+    When exact per-match defensive points are unavailable, the aggregate
+    conceded-goals fallback remains as a legacy approximation.
     """
     if sp.games_played <= 0:
         return 0
@@ -119,11 +155,69 @@ def _compute_total_points(sp: ScrapedPlayer) -> float:
     return total
 
 
+def _compute_match_defensive_points(
+    position: PlayerPosition | str | None,
+    goals_conceded: int,
+    *,
+    in_roster: bool,
+) -> int:
+    if not in_roster:
+        return 0
+
+    scoring = _SCORING_BY_POSITION.get(_coerce_position(position))
+    if scoring is None or scoring.defensive_base is None:
+        return 0
+
+    return max(
+        scoring.defensive_base - goals_conceded * scoring.defensive_conceded_multiplier,
+        0,
+    )
+
+
 def _rating_group_key(tournament_name: str) -> str:
     division_name = _extract_division_name(tournament_name)
     if division_name:
         return division_name
     return tournament_name.strip()
+
+
+def _season_label_for_player(player: ScrapedPlayer) -> str:
+    return (player.season_label or player.tournament).strip()
+
+
+def _season_key_for_label(label: str, season_bucket: str) -> str:
+    normalized = label.strip()
+    if not normalized:
+        return season_bucket
+
+    match = _SEASON_KEY_PATTERN.search(normalized)
+    if not match:
+        return normalized
+
+    start_year = match.group(1)
+    end_year = match.group(2)
+    if len(end_year) == 2:
+        end_year = f"{start_year[:2]}{end_year}"
+    return f"{start_year}/{end_year}"
+
+
+def _season_key_for_player(player: ScrapedPlayer) -> str:
+    if player.season_key:
+        return player.season_key
+    return _season_key_for_label(_season_label_for_player(player), player.season_bucket)
+
+
+def _resolve_tournament_season(players: list[ScrapedPlayer], tournament_name: str) -> tuple[str, str]:
+    if not players:
+        label = tournament_name
+        return label, _season_key_for_label(label, "current")
+
+    labels = [_season_label_for_player(player) for player in players if _season_label_for_player(player)]
+    if not labels:
+        label = tournament_name
+    else:
+        label = Counter(labels).most_common(1)[0][0]
+    return label, _season_key_for_label(label, players[0].season_bucket)
 
 
 def _compute_rankings(players: list[ScrapedPlayer]) -> dict[str, dict]:
@@ -158,24 +252,23 @@ def _apply_match_stat_aggregates(
         by_player[stat.player_external_id].append(stat)
 
     for player in players:
-        player_match_stats = by_player.get(player.external_id, [])
+        player_match_stats = [
+            stat for stat in by_player.get(player.external_id, []) if stat.in_roster
+        ]
         if not player_match_stats:
             continue
 
         player.wins = sum(1 for stat in player_match_stats if stat.team_won)
         player.starts = sum(1 for stat in player_match_stats if stat.started)
         player.goals_conceded = sum(stat.goals_conceded for stat in player_match_stats)
-
-        scoring = _SCORING_BY_POSITION.get(_coerce_position(player.position))
-        if scoring and scoring.defensive_base is not None:
-            player.defensive_points = sum(
-                max(
-                    scoring.defensive_base
-                    - stat.goals_conceded * scoring.defensive_conceded_multiplier,
-                    0,
-                )
-                for stat in player_match_stats
+        player.defensive_points = sum(
+            _compute_match_defensive_points(
+                player.position,
+                stat.goals_conceded,
+                in_roster=stat.in_roster,
             )
+            for stat in player_match_stats
+        )
 
 
 def _resolve_club_id(
@@ -249,7 +342,7 @@ class SyncService:
             matched = 0
             prev_matched = 0
             saved = 0
-            rated = 0
+            season_saved = 0
 
             for tournament_name in sorted(teams_by_tournament):
                 tournament_current_players: list[ScrapedPlayer] = []
@@ -272,23 +365,35 @@ class SyncService:
                         players=current_group,
                         club_map=club_map,
                     )
+                    club_season_saved = await self._save_scraped_player_season_stats_batch(
+                        session=session,
+                        players=current_group + prev_group,
+                        club_map=club_map,
+                    )
                     await session.commit()
                     tournament_saved += club_saved
                     saved += club_saved
+                    season_saved += club_season_saved
                     logger.info(
                         f"Club '{team.name}' in tournament '{tournament_name}': "
-                        f"{club_saved} scraped players saved"
+                        f"{club_saved} current snapshots and {club_season_saved} season rows saved"
                     )
 
                 match_stats: list[ScrapedMatchPlayerStat] = []
                 tournament = tournaments_by_name.get(tournament_name)
                 if tournament is not None:
+                    season_label, season_key = _resolve_tournament_season(
+                        tournament_current_players,
+                        tournament_name,
+                    )
                     match_stats = await self.scraper.scrape_match_stats_for_tournament(tournament)
                     match_rows_saved = await self._save_match_stats_batch(
                         session=session,
                         match_stats=match_stats,
                         tournament_id=tournament_map[tournament_name],
                         club_map=club_map,
+                        season_key=season_key,
+                        season_label=season_label,
                     )
                     await session.commit()
                     logger.info(
@@ -296,29 +401,21 @@ class SyncService:
                         f"{match_rows_saved} match player rows saved"
                     )
 
-                _apply_match_stat_aggregates(tournament_current_players, match_stats)
                 logger.info(
                     f"Tournament '{tournament_name}': "
                     f"{tournament_saved} scraped players saved"
                 )
 
-            ranking_map = _compute_rankings(all_current_players)
-            prev_ranking_map = _compute_rankings(all_prev_players)
-
-            rated = await self._save_scraped_player_ratings_batch(
+            computed_ratings = await self._fetch_computed_ratings_batch(
                 session=session,
-                players=all_current_players,
-                club_map=club_map,
-                ranking_map=ranking_map,
+                players=all_current_players + all_prev_players,
             )
-            await session.commit()
 
             matched, prev_matched = await self._sync_registered_players_batch(
                 session=session,
                 current_players=all_current_players,
                 prev_players=all_prev_players,
-                ranking_map=ranking_map,
-                prev_ranking_map=prev_ranking_map,
+                computed_ratings=computed_ratings,
                 now=now,
             )
             await session.commit()
@@ -326,7 +423,7 @@ class SyncService:
             logger.info(
                 f"Sync completed: {len(tournaments)} tournaments, {len(teams)} teams, "
                 f"{total_current_players} current players, {total_prev_players} previous players, "
-                f"{saved} saved, {rated} current ratings persisted, "
+                f"{saved} current snapshots saved, {season_saved} season rows saved, "
                 f"{matched} current matched, {prev_matched} previous matched"
             )
 
@@ -415,25 +512,41 @@ class SyncService:
         return saved
 
     @classmethod
-    async def _save_scraped_player_ratings_batch(
+    async def _save_scraped_player_season_stats_batch(
         cls,
         session: AsyncSession,
         players: list[ScrapedPlayer],
         club_map: dict[tuple[str, str], int],
-        ranking_map: dict[str, dict],
     ) -> int:
         saved = 0
         for sp in players:
             club_id = club_map.get((sp.tournament, sp.team))
-            await cls._upsert_scraped_player(
-                session,
-                sp,
-                club_id,
-                computed=ranking_map.get(sp.external_id),
-            )
+            await cls._upsert_scraped_player_season_stat(session, sp, club_id)
             saved += 1
         await session.flush()
         return saved
+
+    @staticmethod
+    async def _fetch_computed_ratings_batch(
+        session: AsyncSession,
+        players: list[ScrapedPlayer],
+    ) -> dict[tuple[str, str], dict]:
+        if not players:
+            return {}
+
+        external_ids = sorted({player.external_id for player in players})
+        season_labels = sorted({_season_label_for_player(player) for player in players})
+        stmt = (
+            select(_computed_ratings_view)
+            .where(_computed_ratings_view.c.external_id.in_(external_ids))
+            .where(_computed_ratings_view.c.season_label.in_(season_labels))
+        )
+        result = await session.execute(stmt)
+        rows = result.mappings().all() or []
+        return {
+            (row["external_id"], row["season_label"]): dict(row)
+            for row in rows
+        }
 
     @classmethod
     async def _save_match_stats_batch(
@@ -442,11 +555,20 @@ class SyncService:
         match_stats: list[ScrapedMatchPlayerStat],
         tournament_id: int,
         club_map: dict[tuple[str, str], int],
+        season_key: str | None,
+        season_label: str | None,
     ) -> int:
         saved = 0
         for stat in match_stats:
             club_id = _resolve_club_id(club_map, stat.tournament, stat.team_name)
-            await cls._upsert_match_player_stat(session, stat, tournament_id, club_id)
+            await cls._upsert_match_player_stat(
+                session,
+                stat,
+                tournament_id,
+                club_id,
+                season_key=season_key,
+                season_label=season_label,
+            )
             saved += 1
         await session.flush()
         return saved
@@ -464,48 +586,40 @@ class SyncService:
         session: AsyncSession,
         current_players: list[ScrapedPlayer],
         prev_players: list[ScrapedPlayer],
-        ranking_map: dict[str, dict],
-        prev_ranking_map: dict[str, dict],
+        computed_ratings: dict[tuple[str, str], dict],
         now: datetime,
     ) -> tuple[int, int]:
         matched = 0
         prev_matched = 0
-        current_matched_players: list[Player] = []
-        prev_matched_players: list[Player] = []
 
         for sp in current_players:
             db_player = await cls._find_registered_player(session, sp)
             if not db_player:
                 continue
 
-            computed = ranking_map.get(sp.external_id, {})
+            computed = cls._lookup_computed_rating(computed_ratings, sp)
             cls._apply_current_player_data(
                 db_player=db_player,
                 scraped_player=sp,
                 computed=computed,
                 now=now,
             )
-            current_matched_players.append(db_player)
             matched += 1
-
-        cls._apply_position_ranks(current_matched_players, current=True)
 
         for sp in prev_players:
             db_player = await cls._find_registered_player(session, sp)
             if not db_player:
                 continue
 
-            computed = prev_ranking_map.get(sp.external_id, {})
+            computed = cls._lookup_computed_rating(computed_ratings, sp)
             cls._apply_previous_player_data(
                 db_player=db_player,
                 scraped_player=sp,
                 computed=computed,
                 now=now,
             )
-            prev_matched_players.append(db_player)
             prev_matched += 1
 
-        cls._apply_position_ranks(prev_matched_players, current=False)
         await session.flush()
         return matched, prev_matched
 
@@ -514,7 +628,6 @@ class SyncService:
         session: AsyncSession,
         sp: ScrapedPlayer,
         club_id: int | None,
-        computed: dict | None = None,
     ) -> None:
         now = datetime.now(timezone.utc)
         values = {
@@ -544,19 +657,6 @@ class SyncService:
             "red_cards": sp.red_cards,
             "updated_at": now,
         }
-        if computed is not None:
-            values.update({
-                "current_rating": computed.get("current_rating"),
-                "division_rank": computed.get("division_rank"),
-                "division_total": computed.get("division_total"),
-                "avg_points_per_game": computed.get("avg_points_per_game"),
-            })
-            update_values.update({
-                "current_rating": computed.get("current_rating"),
-                "division_rank": computed.get("division_rank"),
-                "division_total": computed.get("division_total"),
-                "avg_points_per_game": computed.get("avg_points_per_game"),
-            })
 
         stmt = pg_insert(ScrapedPlayerStats).values(
             **values,
@@ -568,11 +668,65 @@ class SyncService:
         await session.execute(stmt)
 
     @staticmethod
+    async def _upsert_scraped_player_season_stat(
+        session: AsyncSession,
+        sp: ScrapedPlayer,
+        club_id: int | None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        season_label = _season_label_for_player(sp)
+        position = _coerce_position(sp.position)
+        values = {
+            "external_id": sp.external_id,
+            "season_key": _season_key_for_player(sp),
+            "season_label": season_label,
+            "season_bucket": sp.season_bucket,
+            "tournament_name": sp.tournament,
+            "first_name": sp.first_name,
+            "last_name": sp.last_name,
+            "position": position.value if position is not None else None,
+            "club_id": club_id,
+            "games_played": sp.games_played,
+            "mvp_count": sp.mvp_count,
+            "goals": sp.goals,
+            "assists": sp.assists,
+            "yellow_cards": sp.yellow_cards,
+            "red_cards": sp.red_cards,
+            "scraped_rating": sp.rating,
+            "updated_at": now,
+        }
+        update_values = {
+            "season_key": _season_key_for_player(sp),
+            "season_bucket": sp.season_bucket,
+            "tournament_name": sp.tournament,
+            "first_name": sp.first_name,
+            "last_name": sp.last_name,
+            "position": position.value if position is not None else None,
+            "club_id": club_id,
+            "games_played": sp.games_played,
+            "mvp_count": sp.mvp_count,
+            "goals": sp.goals,
+            "assists": sp.assists,
+            "yellow_cards": sp.yellow_cards,
+            "red_cards": sp.red_cards,
+            "scraped_rating": sp.rating,
+            "updated_at": now,
+        }
+        stmt = pg_insert(ScrapedPlayerSeasonStats).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_scraped_player_season_stats_external_id_season_label",
+            set_=update_values,
+        )
+        await session.execute(stmt)
+
+    @staticmethod
     async def _upsert_match_player_stat(
         session: AsyncSession,
         stat: ScrapedMatchPlayerStat,
         tournament_id: int,
         club_id: int | None,
+        season_key: str | None,
+        season_label: str | None,
     ) -> None:
         now = datetime.now(timezone.utc)
         values = {
@@ -580,6 +734,8 @@ class SyncService:
             "match_url": stat.match_url,
             "tournament_id": tournament_id,
             "club_id": club_id,
+            "season_key": season_key,
+            "season_label": season_label,
             "player_external_id": stat.player_external_id,
             "player_name": stat.player_name,
             "team_name": stat.team_name,
@@ -634,6 +790,16 @@ class SyncService:
         return None
 
     @staticmethod
+    def _lookup_computed_rating(
+        computed_ratings: dict[tuple[str, str], dict],
+        scraped_player: ScrapedPlayer,
+    ) -> dict:
+        return computed_ratings.get(
+            (scraped_player.external_id, _season_label_for_player(scraped_player)),
+            computed_ratings.get(scraped_player.external_id, {}),
+        )
+
+    @staticmethod
     def _apply_current_player_data(
         db_player: Player,
         scraped_player: ScrapedPlayer,
@@ -656,6 +822,8 @@ class SyncService:
         db_player.current_rating = computed.get("current_rating")
         db_player.division_rank = computed.get("division_rank")
         db_player.division_total = computed.get("division_total")
+        db_player.position_rank = computed.get("position_rank")
+        db_player.position_total = computed.get("position_total")
         db_player.avg_points_per_game = computed.get("avg_points_per_game")
         db_player.rating_updated_at = now
 
@@ -673,8 +841,8 @@ class SyncService:
         db_player.prev_season_rating = computed.get("current_rating")
         db_player.prev_division_rank = computed.get("division_rank")
         db_player.prev_division_total = computed.get("division_total")
-        db_player.prev_position_rank = None
-        db_player.prev_position_total = None
+        db_player.prev_position_rank = computed.get("position_rank")
+        db_player.prev_position_total = computed.get("position_total")
         db_player.prev_avg_points = computed.get("avg_points_per_game")
         db_player.prev_rating_updated_at = now
 

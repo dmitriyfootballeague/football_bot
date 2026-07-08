@@ -8,6 +8,9 @@ class ScrapedPlayer:
     external_id: str
     team: str
     tournament: str
+    season_bucket: str = "current"
+    season_label: str | None = None
+    season_key: str | None = None
     games_played: int = 0
     mvp_count: int = 0
     goals: int = 0

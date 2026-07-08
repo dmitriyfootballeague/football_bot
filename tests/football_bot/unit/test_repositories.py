@@ -3,6 +3,7 @@ from sqlalchemy.dialects import postgresql
 from football_bot.models import RegistrationStatus, TransferStatus, TransferType
 from football_bot.repository.club_repo import ClubRepository
 from football_bot.repository.player_repo import PlayerRepository
+from football_bot.repository.season_rating_repo import SeasonRatingRepository
 from football_bot.repository.tournament_repo import TournamentRepository
 from football_bot.repository.transfer_repo import TransferRepository
 
@@ -26,6 +27,7 @@ class RecordingSession:
         self.result = result
         self.executed = []
         self.commits = 0
+        self.flush_calls = 0
         self.added = []
         self.refreshed = []
         self.get_calls = []
@@ -36,6 +38,9 @@ class RecordingSession:
 
     async def commit(self):
         self.commits += 1
+
+    async def flush(self):
+        self.flush_calls += 1
 
     def add(self, obj):
         self.added.append(obj)
@@ -80,6 +85,68 @@ def test_player_repo_update_rating_data_updates_requested_fields(run_async):
     assert params["id_1"] == 7
     assert params["current_rating"] == 88.5
     assert params["division_rank"] == 2
+
+
+def test_season_rating_repo_apply_rating_override_returns_false_without_linked_row(run_async, player_factory):
+    session = RecordingSession()
+    repo = SeasonRatingRepository(session)
+    player = player_factory(player_id=21, telegram_id=2021, external_id=None)
+
+    result = run_async(
+        repo.apply_rating_override(
+            player,
+            season_bucket="current",
+            rating=9.1,
+            updated_at=None,
+        )
+    )
+
+    assert result is False
+    assert session.commits == 0
+
+
+def test_season_rating_repo_apply_rating_override_updates_row_and_commits(run_async, monkeypatch, player_factory):
+    session = RecordingSession()
+    repo = SeasonRatingRepository(session)
+    player = player_factory(player_id=22, telegram_id=2022, external_id="ext-22")
+    season_row = type(
+        "SeasonRow",
+        (),
+        {
+            "season_key": "2025/2026",
+            "rating_override": None,
+            "rating_override_updated_at": None,
+        },
+    )()
+    calls = []
+
+    async def fake_get_or_create(self, incoming_player, season_bucket):
+        calls.append(("get_or_create", incoming_player.id, season_bucket))
+        return season_row
+
+    async def fake_sync_players(self, *, season_key, season_bucket, updated_at):
+        calls.append(("sync_players", season_key, season_bucket, updated_at))
+
+    monkeypatch.setattr(SeasonRatingRepository, "_get_or_create_season_row", fake_get_or_create)
+    monkeypatch.setattr(SeasonRatingRepository, "_sync_players_from_view", fake_sync_players)
+
+    result = run_async(
+        repo.apply_rating_override(
+            player,
+            season_bucket="current",
+            rating=11.4,
+            updated_at="now-marker",
+        )
+    )
+
+    assert result is True
+    assert season_row.rating_override == 11.4
+    assert season_row.rating_override_updated_at == "now-marker"
+    assert calls == [
+        ("get_or_create", 22, "current"),
+        ("sync_players", "2025/2026", "current", "now-marker"),
+    ]
+    assert session.commits == 1
 
 
 def test_transfer_repo_get_active_for_player_uses_active_statuses(run_async):

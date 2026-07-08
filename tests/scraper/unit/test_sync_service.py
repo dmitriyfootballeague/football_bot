@@ -56,6 +56,9 @@ class FakeScalarResult:
     def scalars(self):
         return self
 
+    def mappings(self):
+        return self
+
     def all(self):
         return self._value
 
@@ -323,6 +326,99 @@ def test_apply_match_stat_aggregates_adds_wins_starts_and_defensive_points():
     assert _compute_total_points(player) == 8
 
 
+def test_apply_match_stat_aggregates_awards_defensive_points_to_bench_player_in_roster():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=1,
+        position=PlayerPosition.DEFENDER.value,
+    )
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id="m1",
+            match_url="https://olesports.ru/match/m1",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name="FC Other",
+            is_home=True,
+            in_roster=True,
+            started=False,
+            mvp=False,
+            team_goals=1,
+            opponent_goals=0,
+            goals_conceded=0,
+            team_won=True,
+        ),
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.wins == 1
+    assert player.starts == 0
+    assert player.goals_conceded == 0
+    assert player.defensive_points == 8
+
+
+def test_apply_match_stat_aggregates_ignores_non_roster_rows():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=2,
+        position=PlayerPosition.DEFENSIVE_MIDFIELDER.value,
+    )
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id="m1",
+            match_url="https://olesports.ru/match/m1",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name="FC Other",
+            is_home=True,
+            in_roster=True,
+            started=False,
+            mvp=False,
+            team_goals=1,
+            opponent_goals=2,
+            goals_conceded=2,
+            team_won=False,
+        ),
+        ScrapedMatchPlayerStat(
+            match_external_id="m2",
+            match_url="https://olesports.ru/match/m2",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name="FC Other",
+            is_home=False,
+            in_roster=False,
+            started=True,
+            mvp=False,
+            team_goals=3,
+            opponent_goals=0,
+            goals_conceded=0,
+            team_won=True,
+        ),
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.wins == 0
+    assert player.starts == 0
+    assert player.goals_conceded == 2
+    assert player.defensive_points == 3
+
+
 def test_resolve_club_id_matches_team_name_case_insensitively():
     club_map = {("League", "СБР-А сталь"): 10}
 
@@ -516,7 +612,7 @@ def test_save_scraped_players_batch_uses_tournament_and_club_map(monkeypatch):
     assert session.flush_calls == 1
 
 
-def test_save_scraped_player_ratings_batch_persists_computed_fields(monkeypatch):
+def test_save_scraped_player_season_stats_batch_uses_tournament_and_club_map(monkeypatch):
     calls = []
     session = FakeSession()
     players = [
@@ -526,6 +622,9 @@ def test_save_scraped_player_ratings_batch_persists_computed_fields(monkeypatch)
             external_id="p1",
             team="Club A",
             tournament="League",
+            season_bucket="current",
+            season_label="League 2025/2026",
+            season_key="2025/2026",
         ),
         ScrapedPlayer(
             first_name="Petr",
@@ -533,31 +632,33 @@ def test_save_scraped_player_ratings_batch_persists_computed_fields(monkeypatch)
             external_id="p2",
             team="Club B",
             tournament="League",
+            season_bucket="previous",
+            season_label="League 2024/2025",
+            season_key="2024/2025",
         ),
     ]
-    ranking_map = {
-        "p1": {"current_rating": 9, "division_rank": 1, "division_total": 2, "avg_points_per_game": 4.5},
-        "p2": {"current_rating": 3, "division_rank": 2, "division_total": 2, "avg_points_per_game": 1.5},
-    }
 
-    async def fake_upsert_scraped_player(_session, player, club_id, computed=None):
-        calls.append((player.external_id, club_id, computed))
+    async def fake_upsert_scraped_player_season_stat(_session, player, club_id):
+        calls.append((player.external_id, club_id, player.season_label))
 
-    monkeypatch.setattr(SyncService, "_upsert_scraped_player", staticmethod(fake_upsert_scraped_player))
+    monkeypatch.setattr(
+        SyncService,
+        "_upsert_scraped_player_season_stat",
+        staticmethod(fake_upsert_scraped_player_season_stat),
+    )
 
     saved = asyncio.run(
-        SyncService._save_scraped_player_ratings_batch(
+        SyncService._save_scraped_player_season_stats_batch(
             session,
             players,
             {("League", "Club A"): 1, ("League", "Club B"): 2},
-            ranking_map,
         )
     )
 
     assert saved == 2
     assert calls == [
-        ("p1", 1, ranking_map["p1"]),
-        ("p2", 2, ranking_map["p2"]),
+        ("p1", 1, "League 2025/2026"),
+        ("p2", 2, "League 2024/2025"),
     ]
     assert session.flush_calls == 1
 
@@ -619,7 +720,7 @@ def test_upsert_scraped_player_uses_postgres_on_conflict_update():
     assert "current_rating" not in sql
 
 
-def test_upsert_scraped_player_persists_computed_rating_fields():
+def test_upsert_scraped_player_season_stat_uses_postgres_on_conflict_update():
     session = FakeSession()
     scraped_player = ScrapedPlayer(
         first_name="Ivan",
@@ -627,6 +728,9 @@ def test_upsert_scraped_player_persists_computed_rating_fields():
         external_id="player-1",
         team="Club A",
         tournament="League",
+        season_bucket="current",
+        season_label="Высший (Лига 8x8, 2025/2026)",
+        season_key="2025/2026",
         games_played=5,
         mvp_count=1,
         goals=2,
@@ -636,29 +740,24 @@ def test_upsert_scraped_player_persists_computed_rating_fields():
     )
 
     asyncio.run(
-        SyncService._upsert_scraped_player(
+        SyncService._upsert_scraped_player_season_stat(
             session,
             scraped_player,
             club_id=10,
-            computed={
-                "current_rating": 18.5,
-                "division_rank": 4,
-                "division_total": 20,
-                "avg_points_per_game": 3.7,
-            },
         )
     )
 
+    assert len(session.executed_statements) == 1
     sql = str(
         session.executed_statements[0].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
-    assert "current_rating" in sql
-    assert "division_rank" in sql
-    assert "division_total" in sql
-    assert "avg_points_per_game" in sql
+    assert "scraped_player_season_stats" in sql
+    assert "season_label" in sql
+    assert "season_key" in sql
+    assert "ON CONFLICT" in sql
 
 
 def test_upsert_match_player_stat_uses_postgres_on_conflict_update():
@@ -688,6 +787,8 @@ def test_upsert_match_player_stat_uses_postgres_on_conflict_update():
             stat,
             tournament_id=7,
             club_id=10,
+            season_key="2025/2026",
+            season_label="Высший (Лига 8x8, 2025/2026)",
         )
     )
 
@@ -702,6 +803,7 @@ def test_upsert_match_player_stat_uses_postgres_on_conflict_update():
     assert "DO UPDATE" in sql
     assert "match_stats" in sql
     assert "uq_match_stats_match_player" in sql
+    assert "season_label" in sql
 
 
 def test_find_registered_player_prefers_external_id_match():
@@ -857,12 +959,38 @@ def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeyp
         ),
     ]
     ranking_map = {
-        "cur-a": {"current_rating": 9, "division_rank": 1, "division_total": 2, "avg_points_per_game": 4.5},
-        "cur-b": {"current_rating": 3, "division_rank": 2, "division_total": 2, "avg_points_per_game": 1.0},
-    }
-    prev_ranking_map = {
-        "prev-a": {"current_rating": 11, "division_rank": 1, "division_total": 2, "avg_points_per_game": 5.5},
-        "prev-b": {"current_rating": 4, "division_rank": 2, "division_total": 2, "avg_points_per_game": 2.0},
+        "cur-a": {
+            "current_rating": 9,
+            "division_rank": 1,
+            "division_total": 2,
+            "position_rank": 1,
+            "position_total": 1,
+            "avg_points_per_game": 4.5,
+        },
+        "cur-b": {
+            "current_rating": 3,
+            "division_rank": 2,
+            "division_total": 2,
+            "position_rank": 1,
+            "position_total": 1,
+            "avg_points_per_game": 1.0,
+        },
+        "prev-a": {
+            "current_rating": 11,
+            "division_rank": 1,
+            "division_total": 2,
+            "position_rank": 1,
+            "position_total": 1,
+            "avg_points_per_game": 5.5,
+        },
+        "prev-b": {
+            "current_rating": 4,
+            "division_rank": 2,
+            "division_total": 2,
+            "position_rank": 1,
+            "position_total": 1,
+            "avg_points_per_game": 2.0,
+        },
     }
     session = FakeSession()
 
@@ -871,8 +999,7 @@ def test_sync_registered_players_batch_updates_fields_and_position_ranks(monkeyp
             session=session,
             current_players=current_players,
             prev_players=prev_players,
-            ranking_map=ranking_map,
-            prev_ranking_map=prev_ranking_map,
+            computed_ratings=ranking_map,
             now=now,
         )
     )
@@ -911,38 +1038,56 @@ def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
         events.append(("save_scraped_players_batch", [player.team for player in players], club_map))
         return len(players)
 
-    async def fake_save_match_stats_batch(session, match_stats, tournament_id, club_map):
+    async def fake_save_scraped_player_season_stats_batch(session, players, club_map):
+        events.append((
+            "save_scraped_player_season_stats_batch",
+            [player.external_id for player in players],
+            club_map,
+        ))
+        return len(players)
+
+    async def fake_save_match_stats_batch(
+        session,
+        match_stats,
+        tournament_id,
+        club_map,
+        season_key,
+        season_label,
+    ):
         events.append((
             "save_match_stats_batch",
             [stat.match_external_id for stat in match_stats],
             tournament_id,
             club_map,
+            season_key,
+            season_label,
         ))
         return len(match_stats)
 
     async def fake_sync_registered_players_batch(
-        session, current_players, prev_players, ranking_map, prev_ranking_map, now
+        session, current_players, prev_players, computed_ratings, now
     ):
         events.append((
             "sync_registered_players_batch",
             [player.team for player in current_players],
             [player.team for player in prev_players],
+            sorted(computed_ratings),
         ))
         return len(current_players), len(prev_players)
 
-    async def fake_save_scraped_player_ratings_batch(session, players, club_map, ranking_map):
+    async def fake_fetch_computed_ratings_batch(session, players):
         events.append((
-            "save_scraped_player_ratings_batch",
-            [player.team for player in players],
-            club_map,
+            "fetch_computed_ratings_batch",
+            [player.external_id for player in players],
         ))
-        return len(players)
+        return {player.external_id: {"current_rating": 1} for player in players}
 
     monkeypatch.setattr(SyncService, "_upsert_tournaments_batch", staticmethod(fake_upsert_tournaments_batch))
     monkeypatch.setattr(SyncService, "_upsert_clubs_batch", staticmethod(fake_upsert_clubs_batch))
     monkeypatch.setattr(SyncService, "_save_scraped_players_batch", classmethod(lambda cls, *args, **kwargs: fake_save_scraped_players_batch(*args, **kwargs)))
+    monkeypatch.setattr(SyncService, "_save_scraped_player_season_stats_batch", classmethod(lambda cls, *args, **kwargs: fake_save_scraped_player_season_stats_batch(*args, **kwargs)))
     monkeypatch.setattr(SyncService, "_save_match_stats_batch", classmethod(lambda cls, *args, **kwargs: fake_save_match_stats_batch(*args, **kwargs)))
-    monkeypatch.setattr(SyncService, "_save_scraped_player_ratings_batch", classmethod(lambda cls, *args, **kwargs: fake_save_scraped_player_ratings_batch(*args, **kwargs)))
+    monkeypatch.setattr(SyncService, "_fetch_computed_ratings_batch", staticmethod(fake_fetch_computed_ratings_batch))
     monkeypatch.setattr(SyncService, "_sync_registered_players_batch", classmethod(lambda cls, *args, **kwargs: fake_sync_registered_players_batch(*args, **kwargs)))
 
     service = SyncService(pool, "https://example.test")
@@ -959,15 +1104,16 @@ def test_run_sync_processes_phases_and_commits_per_club(monkeypatch):
         "session2:commit",
         ("scrape_players_for_team", "Club A"),
         ("save_scraped_players_batch", ["Club A"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        ("save_scraped_player_season_stats_batch", ["c1-cur", "c1-prev"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
         "session2:commit",
         ("scrape_players_for_team", "Club B"),
         ("save_scraped_players_batch", ["Club B"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        ("save_scraped_player_season_stats_batch", ["c2-cur", "c2-prev"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
         "session2:commit",
         ("scrape_match_stats_for_tournament", "League"),
-        ("save_match_stats_batch", ["m1"], 1, {("League", "Club A"): 10, ("League", "Club B"): 20}),
+        ("save_match_stats_batch", ["m1"], 1, {("League", "Club A"): 10, ("League", "Club B"): 20}, "League", "League"),
         "session2:commit",
-        ("save_scraped_player_ratings_batch", ["Club A", "Club B"], {("League", "Club A"): 10, ("League", "Club B"): 20}),
-        "session2:commit",
-        ("sync_registered_players_batch", ["Club A", "Club B"], ["Club A", "Club B"]),
+        ("fetch_computed_ratings_batch", ["c1-cur", "c2-cur", "c1-prev", "c2-prev"]),
+        ("sync_registered_players_batch", ["Club A", "Club B"], ["Club A", "Club B"], ["c1-cur", "c1-prev", "c2-cur", "c2-prev"]),
         "session2:commit",
     ]

@@ -21,6 +21,8 @@ class MatchPlayerStats(TimestampMixin, Base):
     match_url: Mapped[str] = mapped_column(String(500), nullable=False)
     tournament_id: Mapped[int] = mapped_column(ForeignKey("tournaments.id"), nullable=False)
     club_id: Mapped[int | None] = mapped_column(ForeignKey("clubs.id"), nullable=True)
+    season_key: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    season_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     player_external_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     player_name: Mapped[str] = mapped_column(String(200), nullable=False)

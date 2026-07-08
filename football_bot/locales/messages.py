@@ -253,5 +253,6 @@ ADMIN_PREV_RATING_UPDATED = "✅ Рейтинг за прошлый сезон �
 ADMIN_NO_CLUBS = "Клубы не найдены."
 ADMIN_NO_PLAYERS = "Зарегистрированные игроки не найдены."
 ADMIN_INVALID_RATING = "Пожалуйста, введите корректное число."
+ADMIN_RATING_SEASON_UNAVAILABLE = "Для игрока {name} не найдены данные выбранного сезона."
 ADMIN_ACTION_CANCELLED = "❌ Действие отменено. Выберите следующее действие:"
 ADMIN_ALL_PLAYERS_EXPORTED = "📄 Выгрузка всех игроков готова. Всего строк: {count}"
