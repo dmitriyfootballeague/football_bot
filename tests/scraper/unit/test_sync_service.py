@@ -17,6 +17,7 @@ from scraper.scraped_data import ScrapedMatchPlayerStat
 from scraper.sync_service import (
     SyncService,
     _apply_match_stat_aggregates,
+    _compute_match_defensive_points,
     _compute_rankings,
     _compute_total_points,
     _resolve_club_id,
@@ -197,7 +198,7 @@ def test_compute_total_points_ignores_scraped_rating_without_fixed_position():
     assert _compute_total_points(player) == 11
 
 
-def test_compute_total_points_uses_position_specific_scout_formula():
+def test_compute_total_points_uses_position_specific_scout_formula_with_precomputed_defense():
     player = ScrapedPlayer(
         first_name="Ivan",
         last_name="Petrov",
@@ -211,7 +212,7 @@ def test_compute_total_points_uses_position_specific_scout_formula():
         position=PlayerPosition.DEFENSIVE_MIDFIELDER.value,
         wins=5,
         starts=6,
-        goals_conceded=12,
+        defensive_points=38,
     )
 
     assert _compute_total_points(player) == 69
@@ -226,10 +227,40 @@ def test_compute_total_points_clamps_defensive_points_at_zero():
         tournament="Optic",
         games_played=1,
         position=PlayerPosition.DEFENDER.value,
-        goals_conceded=10,
+        defensive_points=-8,
     )
 
     assert _compute_total_points(player) == 0
+
+
+@pytest.mark.parametrize(
+    ("position", "goals_conceded", "in_roster", "expected"),
+    [
+        (PlayerPosition.DEFENDER.value, 0, True, 8),
+        (PlayerPosition.DEFENDER.value, 4, True, 0),
+        (PlayerPosition.GOALKEEPER.value, 1, True, 6),
+        (PlayerPosition.DEFENSIVE_MIDFIELDER.value, 0, True, 5),
+        (PlayerPosition.DEFENSIVE_MIDFIELDER.value, 5, True, 0),
+        (PlayerPosition.ATTACKING_MIDFIELDER.value, 3, True, 1),
+        (PlayerPosition.ATTACKING_MIDFIELDER.value, 4, True, 0),
+        (PlayerPosition.FORWARD.value, 0, True, 0),
+        (PlayerPosition.DEFENDER.value, 0, False, 0),
+    ],
+)
+def test_compute_match_defensive_points_uses_match_level_position_rules(
+    position,
+    goals_conceded,
+    in_roster,
+    expected,
+):
+    assert (
+        _compute_match_defensive_points(
+            position,
+            goals_conceded,
+            in_roster=in_roster,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -324,6 +355,154 @@ def test_apply_match_stat_aggregates_adds_wins_starts_and_defensive_points():
     assert player.goals_conceded == 6
     assert player.defensive_points == 6
     assert _compute_total_points(player) == 8
+
+
+def test_apply_match_stat_aggregates_sums_defensive_points_per_match_for_defender():
+    player = ScrapedPlayer(
+        first_name="Лев",
+        last_name="Титов",
+        external_id="lev-titov",
+        team="Арктик",
+        tournament="Суперлига",
+        games_played=11,
+        position=PlayerPosition.DEFENDER.value,
+    )
+    conceded_by_match = [1, 1, 0, 1, 2, 0, 2, 2, 2, 1, 1]
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id=f"m{index}",
+            match_url=f"https://olesports.ru/match/m{index}",
+            tournament="Суперлига",
+            player_external_id="lev-titov",
+            player_name="Лев Титов",
+            team_name="Арктик",
+            opponent_name=f"Соперник {index}",
+            is_home=bool(index % 2),
+            in_roster=True,
+            started=index % 3 != 0,
+            mvp=False,
+            team_goals=2,
+            opponent_goals=goals_conceded,
+            goals_conceded=goals_conceded,
+            team_won=goals_conceded < 2,
+        )
+        for index, goals_conceded in enumerate(conceded_by_match, start=1)
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.goals_conceded == sum(conceded_by_match)
+    assert player.defensive_points == 62
+
+
+def test_apply_match_stat_aggregates_sums_defensive_points_per_match_for_defensive_midfielder():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=4,
+        position=PlayerPosition.DEFENSIVE_MIDFIELDER.value,
+    )
+    conceded_by_match = [0, 1, 5, 2]
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id=f"m{index}",
+            match_url=f"https://olesports.ru/match/m{index}",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name=f"FC Other {index}",
+            is_home=True,
+            in_roster=True,
+            started=True,
+            mvp=False,
+            team_goals=1,
+            opponent_goals=goals_conceded,
+            goals_conceded=goals_conceded,
+            team_won=True,
+        )
+        for index, goals_conceded in enumerate(conceded_by_match, start=1)
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.defensive_points == 12
+
+
+def test_apply_match_stat_aggregates_sums_defensive_points_per_match_for_attacking_midfielder():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=4,
+        position=PlayerPosition.ATTACKING_MIDFIELDER.value,
+    )
+    conceded_by_match = [0, 1, 4, 2]
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id=f"m{index}",
+            match_url=f"https://olesports.ru/match/m{index}",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name=f"FC Other {index}",
+            is_home=False,
+            in_roster=True,
+            started=False,
+            mvp=False,
+            team_goals=0,
+            opponent_goals=goals_conceded,
+            goals_conceded=goals_conceded,
+            team_won=False,
+        )
+        for index, goals_conceded in enumerate(conceded_by_match, start=1)
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.defensive_points == 9
+
+
+def test_apply_match_stat_aggregates_gives_zero_defensive_points_to_forward():
+    player = ScrapedPlayer(
+        first_name="Ivan",
+        last_name="Petrov",
+        external_id="p1",
+        team="FC Test",
+        tournament="Optic",
+        games_played=3,
+        position=PlayerPosition.FORWARD.value,
+    )
+    match_stats = [
+        ScrapedMatchPlayerStat(
+            match_external_id=f"m{index}",
+            match_url=f"https://olesports.ru/match/m{index}",
+            tournament="Optic",
+            player_external_id="p1",
+            player_name="Ivan Petrov",
+            team_name="FC Test",
+            opponent_name=f"FC Other {index}",
+            is_home=True,
+            in_roster=True,
+            started=bool(index % 2),
+            mvp=False,
+            team_goals=3,
+            opponent_goals=goals_conceded,
+            goals_conceded=goals_conceded,
+            team_won=True,
+        )
+        for index, goals_conceded in enumerate([0, 1, 3], start=1)
+    ]
+
+    _apply_match_stat_aggregates([player], match_stats)
+
+    assert player.defensive_points == 0
 
 
 def test_apply_match_stat_aggregates_awards_defensive_points_to_bench_player_in_roster():
