@@ -8,14 +8,22 @@ from scraper.logging import logger
 from scraper.scraped_data import BROWSER_ARGS, ScrapedMatchPlayerStat, ScrapedTournament
 
 BASE_SITE = "https://olesports.ru"
+RESULTS_API_BASE = "https://engine.amateum.com/client/results"
+_RESULTS_LAYOUTS = ("bytour", "bydate")
 
 
 def _external_id_from_href(href: str, marker: str) -> str:
+    if marker not in href:
+        return ""
     return href.rstrip("/").split(marker, 1)[-1].split("?", 1)[0]
 
 
 def _absolute_url(href: str) -> str:
     return href if href.startswith("http") else f"{BASE_SITE}{href}"
+
+
+def _match_url(match_external_id: str) -> str:
+    return _absolute_url(f"/match/{match_external_id}")
 
 
 def _parse_int(text: str) -> int | None:
@@ -68,24 +76,93 @@ async def scrape_tournament_match_urls(pw, tournament_url: str) -> list[str]:
     try:
         page = await browser.new_page()
         await page.goto(tournament_url, wait_until="domcontentloaded", timeout=40000)
-        await page.wait_for_timeout(7000)
-
-        hrefs: list[str] = await page.eval_on_selector_all(
-            'a[href*="/match/"]',
-            "els => els.map(e => e.getAttribute('href')).filter(Boolean)",
-        )
-        seen: set[str] = set()
-        urls: list[str] = []
-        for href in hrefs:
-            url = _absolute_url(href)
-            match_id = _external_id_from_href(url, "/match/")
-            if not match_id or match_id in seen:
-                continue
-            seen.add(match_id)
-            urls.append(url)
-        return urls
+        await page.wait_for_timeout(5000)
+        return await _scrape_tournament_match_urls_from_page(page, tournament_url)
     finally:
         await browser.close()
+
+
+def _collect_match_urls_from_hrefs(hrefs: list[str]) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for href in hrefs:
+        url = _absolute_url(href)
+        match_id = _external_id_from_href(url, "/match/")
+        if not match_id or match_id in seen:
+            continue
+        seen.add(match_id)
+        urls.append(url)
+    return urls
+
+
+async def _scrape_tournament_match_urls_from_page(
+    page: Page,
+    tournament_url: str,
+) -> list[str]:
+    tournament_external_id = _external_id_from_href(tournament_url, "/tournament/")
+    api_urls: list[str] = []
+    if tournament_external_id:
+        for layout in _RESULTS_LAYOUTS:
+            api_urls.extend(
+                await _fetch_result_match_urls(
+                    page,
+                    tournament_external_id=tournament_external_id,
+                    layout=layout,
+                )
+            )
+
+    hrefs: list[str] = await page.eval_on_selector_all(
+        'a[href*="/match/"]',
+        "els => els.map(e => e.getAttribute('href')).filter(Boolean)",
+    )
+    dom_urls = _collect_match_urls_from_hrefs(hrefs)
+    urls = _collect_match_urls_from_hrefs(api_urls + dom_urls)
+
+    if api_urls:
+        logger.info(
+            f"  Tournament page '{tournament_url}': collected {len(urls)} unique match links "
+            f"({len(api_urls)} via results API, {len(dom_urls)} via DOM)"
+        )
+    return urls
+
+
+async def _fetch_result_match_urls(
+    page: Page,
+    *,
+    tournament_external_id: str,
+    layout: str,
+) -> list[str]:
+    endpoint = f"{RESULTS_API_BASE}/{tournament_external_id}?layout={layout}"
+    try:
+        match_ids = await page.evaluate(
+            """async (endpoint) => {
+                const flattenIds = (groups) => {
+                    if (!Array.isArray(groups)) return [];
+                    return groups.flatMap((group) => {
+                        if (!Array.isArray(group?.list)) return [];
+                        return group.list
+                            .map((match) => match?._id)
+                            .filter((matchId) => typeof matchId === "string" && matchId.length > 0);
+                    });
+                };
+
+                try {
+                    const response = await fetch(endpoint, { credentials: "include" });
+                    if (!response.ok) return [];
+                    return flattenIds(await response.json());
+                } catch (error) {
+                    return [];
+                }
+            }""",
+            endpoint,
+        )
+    except Exception as exc:
+        logger.warning(f"  Failed to load results API '{endpoint}': {exc}")
+        return []
+
+    if not isinstance(match_ids, list):
+        return []
+    return _collect_match_urls_from_hrefs([_match_url(match_id) for match_id in match_ids])
 
 
 async def scrape_match_player_stats(

@@ -1,6 +1,10 @@
 import asyncio
 
-from scraper.match_scraper import scrape_tournament_match_stats
+from scraper.match_scraper import (
+    _collect_match_urls_from_hrefs,
+    _scrape_tournament_match_urls_from_page,
+    scrape_tournament_match_stats,
+)
 from scraper.scraped_data import ScrapedMatchPlayerStat, ScrapedTournament
 
 
@@ -119,3 +123,104 @@ def test_scrape_tournament_match_stats_keeps_successful_rows_on_empty_match(monk
     stats = asyncio.run(scrape_tournament_match_stats(object(), tournament))
 
     assert [stat.match_external_id for stat in stats] == ["m1"]
+
+
+def test_collect_match_urls_from_hrefs_deduplicates_and_normalizes_urls():
+    urls = _collect_match_urls_from_hrefs(
+        [
+            "/match/m1",
+            "https://olesports.ru/match/m1?tab=roster",
+            "/club/c1",
+            "/match/m2/",
+            "",
+        ]
+    )
+
+    assert urls == [
+        "https://olesports.ru/match/m1",
+        "https://olesports.ru/match/m2/",
+    ]
+
+
+class _FakePage:
+    def __init__(self, hrefs):
+        self.hrefs = hrefs
+
+    async def eval_on_selector_all(self, _selector, _script):
+        return self.hrefs
+
+
+def test_scrape_tournament_match_urls_from_page_prefers_full_results_api(monkeypatch):
+    page = _FakePage(
+        [
+            "/match/m1",
+            "/match/m2",
+        ]
+    )
+    calls = []
+
+    async def fake_fetch_result_match_urls(_page, *, tournament_external_id, layout):
+        calls.append((tournament_external_id, layout))
+        if layout == "bytour":
+            return [
+                "https://olesports.ru/match/m1",
+                "https://olesports.ru/match/m2",
+                "https://olesports.ru/match/m3",
+            ]
+        if layout == "bydate":
+            return [
+                "https://olesports.ru/match/m3",
+                "https://olesports.ru/match/m4",
+            ]
+        return []
+
+    monkeypatch.setattr(
+        "scraper.match_scraper._fetch_result_match_urls",
+        fake_fetch_result_match_urls,
+    )
+
+    urls = asyncio.run(
+        _scrape_tournament_match_urls_from_page(
+            page,
+            "https://olesports.ru/tournament/t1",
+        )
+    )
+
+    assert calls == [("t1", "bytour"), ("t1", "bydate")]
+    assert urls == [
+        "https://olesports.ru/match/m1",
+        "https://olesports.ru/match/m2",
+        "https://olesports.ru/match/m3",
+        "https://olesports.ru/match/m4",
+    ]
+
+
+def test_scrape_tournament_match_urls_from_page_falls_back_to_dom_when_results_api_empty(monkeypatch):
+    page = _FakePage(
+        [
+            "/match/m1",
+            "/match/m2",
+            "/match/m2?tab=summary",
+        ]
+    )
+
+    async def fake_fetch_result_match_urls(_page, *, tournament_external_id, layout):
+        assert tournament_external_id == "t1"
+        return []
+
+    monkeypatch.setattr(
+        "scraper.match_scraper._fetch_result_match_urls",
+        fake_fetch_result_match_urls,
+    )
+
+    urls = asyncio.run(
+        _scrape_tournament_match_urls_from_page(
+            page,
+            "https://olesports.ru/tournament/t1",
+        )
+    )
+
+    assert urls == [
+        "https://olesports.ru/match/m1",
+        "https://olesports.ru/match/m2",
+    ]

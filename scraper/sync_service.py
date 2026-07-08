@@ -122,10 +122,10 @@ def _coerce_position(position: PlayerPosition | str | None) -> PlayerPosition | 
 
 
 def _compute_total_points(sp: ScrapedPlayer) -> float:
-    """Compute Scout points from fixed position and available stats.
+    """Compute Scout points from fixed position and precomputed match aggregates.
 
-    When exact per-match defensive points are unavailable, the aggregate
-    conceded-goals fallback remains as a legacy approximation.
+    Defensive points must come from per-match aggregation. We do not reconstruct
+    them from season-level goals conceded because that loses the per-match floor.
     """
     if sp.games_played <= 0:
         return 0
@@ -145,12 +145,6 @@ def _compute_total_points(sp: ScrapedPlayer) -> float:
 
     if sp.defensive_points is not None:
         total += max(sp.defensive_points, 0)
-    elif scoring.defensive_base is not None and sp.goals_conceded is not None:
-        defensive_points = (
-            sp.games_played * scoring.defensive_base
-            - sp.goals_conceded * scoring.defensive_conceded_multiplier
-        )
-        total += max(defensive_points, 0)
 
     return total
 
